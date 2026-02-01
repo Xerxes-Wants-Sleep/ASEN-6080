@@ -1,0 +1,20 @@
+{
+  "frame": "ECI",
+  "orbit_elements": {
+    "a_km": 10000.0,
+    "e": 0.001,
+    "i_deg": 40.0,
+    "raan_deg": 80.0,
+    "argp_deg": 40.0,
+    "ta_deg": 0.0
+  },
+
+  "pert":{
+    "x": 1,
+    "y": 0,
+    "z": 0,
+    "dx": 0,
+    "dy": 10e-3,
+    "dz": 0
+  }
+}

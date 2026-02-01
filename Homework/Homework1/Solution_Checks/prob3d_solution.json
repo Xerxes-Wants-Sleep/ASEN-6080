@@ -1,0 +1,28 @@
+{
+  "problem": "3d",
+  "description": "Htilde measurement partials w.r.t. observer/station state",
+  "function_name": "Htilde_obs_rho_rhod",
+  "inputs": {
+    "spacecraft_state": {
+      "description": "6-element spacecraft state [r(1:3), v(1:3)]",
+      "r": [0.42286036448769, 1.29952829655200, -1.04979323447507],
+      "v": [-1.78641172211092, 0.81604308103192, -0.32820854314251]
+    },
+    "station_state": {
+      "description": "6-element station state [Rs(1:3), Vs(1:3)]",
+      "Rs": [-1.21456561358767, 1.11183287253465, -0.50749695482985],
+      "Vs": [-0.00008107614118, -0.00008856753168, 0.0]
+    }
+  },
+  "outputs": {
+    "Htilde": {
+      "description": "2x3 measurement partials matrix [d(rho)/d(Rs); d(rhodot)/d(Rs)]",
+      "rows": 2,
+      "cols": 3,
+      "values": [
+        [-0.94372160948022, -0.10817724282958, 0.31254952876921],
+        [0.21642817718066, -0.56350923159490, 0.45845237165164]
+      ]
+    }
+  }
+}

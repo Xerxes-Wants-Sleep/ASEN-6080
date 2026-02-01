@@ -1,0 +1,20 @@
+cat > .gitignore <<'EOF'
+# Ignore EVERYTHING by default
+/*
+
+# Keep this file
+!/.gitignore
+
+# Track ONLY these folders (and everything inside them)
+!/src/
+!/src/**
+
+!/Homework/
+!/Homework/**
+
+# Ignore junk even inside tracked folders
+**/__pycache__/
+**/*.py[cod]
+**/.ipynb_checkpoints/
+**/.DS_Store
+EOF
