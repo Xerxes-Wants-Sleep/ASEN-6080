@@ -106,7 +106,7 @@ J3 = -2.5324e-6
 
 
 # -----------------------------
-# 8) Run LKF  (FUNCTION CALL)
+# 8) Run LKF
 # -----------------------------
 lkf = LinearizedKalmanFilter(
     X0_star=X0_star,
