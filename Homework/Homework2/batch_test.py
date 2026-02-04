@@ -1,8 +1,10 @@
 import numpy as np
 import sys
 import pandas as pd
-from pathlib import Path
 
+from pathlib import Path
+# import matplotlib
+# matplotlib.use("Agg")
 sys.path.append("../../")
 
 from src.Functions.stations import Stations
@@ -83,7 +85,7 @@ x0_hat, P0_hat, info = batch_estimate_x0(
     R=R,
     mu=mu,
     J2=J2,
-    J3=J3,
+    J3=False,
     max_iter=10,
     tol=1e-10,
     reltol=1e-10,

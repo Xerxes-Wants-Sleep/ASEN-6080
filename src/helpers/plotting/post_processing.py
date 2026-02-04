@@ -32,20 +32,16 @@ class BatchPostProcessResult:
 
 def compute_rsw_errors_and_cov(
     xhat_meas: np.ndarray,
-    P_meas: np.ndarray,
+    P_meas: np.ndarray | None,
     state_error_meas: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Match MATLAB logic:
-      - Compute RSW frame from truth state (xtrue = xhat - err)
-      - pos_err_rsw = ECI2RSW * pos_err_eci
-      - Pdiag_pos_rsw = diag( ECI2RSW * P_pos * ECI2RSW^T )
-    """
+) -> tuple[np.ndarray, np.ndarray | None]:
+
     m = xhat_meas.shape[0]
     pos_err_rsw = np.full((m, 3), np.nan, dtype=float)
-    Pdiag_pos_rsw = np.full((m, 3), np.nan, dtype=float)
 
-    # truth reconstructed from estimate and error
+    # If covariance history isn't provided, return None for Pdiag_pos_rsw
+    Pdiag_pos_rsw = None if P_meas is None else np.full((m, 3), np.nan, dtype=float)
+
     xtrue = xhat_meas - state_error_meas
     rtrue = xtrue[:, 0:3]
     vtrue = xtrue[:, 3:6]
@@ -61,23 +57,23 @@ def compute_rsw_errors_and_cov(
         rnorm = np.linalg.norm(r)
         h = np.cross(r, v)
         hnorm = np.linalg.norm(h)
-
         if rnorm < 1e-12 or hnorm < 1e-12:
             continue
 
         Rhat = r / rnorm
         What = h / hnorm
         Shat = np.cross(What, Rhat)
-
-        ECI2RSW = np.vstack((Rhat, Shat, What))  # 3x3
+        ECI2RSW = np.vstack((Rhat, Shat, What))
 
         pos_err_rsw[i, :] = (ECI2RSW @ pos_err[i, :].reshape(3, 1)).ravel()
 
-        Ppos = P_meas[i, 0:3, 0:3]
-        P_rsw = ECI2RSW @ Ppos @ ECI2RSW.T
-        Pdiag_pos_rsw[i, :] = np.diag(P_rsw)
+        if P_meas is not None:
+            Ppos = P_meas[i, 0:3, 0:3]
+            P_rsw = ECI2RSW @ Ppos @ ECI2RSW.T
+            Pdiag_pos_rsw[i, :] = np.diag(P_rsw)
 
     return pos_err_rsw, Pdiag_pos_rsw
+
 
 
 def print_rms_summary(result: BatchPostProcessResult, ignore_first_pass: bool = False) -> None:
@@ -174,6 +170,60 @@ def run_batch_post_processing(
         result.postfit_resids_linear_final = info.get("postfit_resids_linear_final", None)
 
     # compute RSW errors/cov if truth available
+    if result.state_error_meas is not None:
+        pos_err_rsw, Pdiag_pos_rsw = compute_rsw_errors_and_cov(
+            result.xhat_meas, result.P_meas, result.state_error_meas
+        )
+        result.pos_err_rsw = pos_err_rsw
+        result.Pdiag_pos_rsw = Pdiag_pos_rsw
+
+    return result
+
+
+
+class Result(dict):
+    """Dict that also supports attribute access: r.t_meas <-> r['t_meas']"""
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as e:
+            raise AttributeError(name) from e
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+
+def as_result(x):
+    """Ensure x supports attribute access."""
+    if isinstance(x, Result):
+        return x
+    if isinstance(x, dict):
+        return Result(x)
+    return x
+
+from dataclasses import fields
+
+def run_filter_post_processing(*, out: dict) -> BatchPostProcessResult:
+    """
+    Convert an LKF/EKF output dict into BatchPostProcessResult so all the
+    batch plotting functions work unchanged.
+    """
+    d = dict(out)
+
+    # ---- key aliases to match BatchPostProcessResult ----
+    if "xhat_meas" not in d and "Xhat_meas" in d:
+        d["xhat_meas"] = d["Xhat_meas"]
+
+    if "rms_by_iter" not in d:
+        d["rms_by_iter"] = None
+
+    # ---- only pass dataclass fields (ignore extra keys) ----
+    allowed = {f.name for f in fields(BatchPostProcessResult)}
+    payload = {k: d.get(k, None) for k in allowed}
+
+    result = BatchPostProcessResult(**payload)
+
+    # ---- compute RSW fields if truth available ----
     if result.state_error_meas is not None:
         pos_err_rsw, Pdiag_pos_rsw = compute_rsw_errors_and_cov(
             result.xhat_meas, result.P_meas, result.state_error_meas

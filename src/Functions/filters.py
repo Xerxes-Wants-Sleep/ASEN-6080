@@ -293,111 +293,142 @@ class LinearizedKalmanFilter(KalmanFilterBase):
     # RUN
     # ------------------------------------------------------------
     def run(self, all_meas, stations, Xtrue_meas: np.ndarray | None = None):
+        # -----------------------------
+        # 0) Setup / sort
+        # -----------------------------
         station_map = {st.name: st for st in stations}
+        all_meas = sorted(all_meas, key=lambda m: float(m["t"]))
 
-        # Sort measurements by time
-        all_meas_sorted = sorted(all_meas, key=lambda m: float(m["t"]))
-        t_meas = np.array([float(m["t"]) for m in all_meas_sorted], dtype=float)
-        st_meas = [m["station"] for m in all_meas_sorted]
-        mcount = len(all_meas_sorted)
+        t_meas = np.array([float(m["t"]) for m in all_meas], dtype=float)
+        st_meas = [m["station"] for m in all_meas]
+        N = len(all_meas)
 
         if Xtrue_meas is not None:
             Xtrue_meas = np.asarray(Xtrue_meas, dtype=float)
-            if Xtrue_meas.shape != (mcount, 6):
-                raise ValueError(f"Xtrue_meas must have shape ({mcount}, 6) aligned with sorted measurement order.")
+            if Xtrue_meas.shape != (N, 6):
+                raise ValueError(f"Xtrue_meas must have shape ({N}, 6) aligned with sorted measurement order.")
 
-        # Precompute reference and Phi(t_i,t0), then build Phi(t_i,t_{i-1})
-        Xstar_hist, Phi_i0_hist = self.propagate_state_and_stm_history(t_meas)
-        Phi_step = self.phi_i0_to_phi_step(Phi_i0_hist)
+        # -----------------------------
+        # 1) Precompute reference + Phi steps
+        # -----------------------------
+        Xstar_hist, Phi_i0_hist = self.propagate_state_and_stm_history(t_meas)  # X*(t_i), Phi(t_i,t0)
+        Phi_step = self.phi_i0_to_phi_step(Phi_i0_hist)                         # Phi(t_i,t_{i-1})
 
-        # outputs
-        Xhat_hist = np.zeros((mcount, 6), dtype=float)
-        postfit_resids = np.full((mcount, 2), np.nan, dtype=float)
-        two_sigma = np.full((mcount, 6), np.nan, dtype=float)
-        state_error = None if Xtrue_meas is None else np.zeros((mcount, 6), dtype=float)
+        # -----------------------------
+        # 2) Allocate outputs (MATLAB-style)
+        # -----------------------------
+        residuals = np.full((N, 2), np.nan, dtype=float)    # prefit: OminusC
+        resid_pf  = np.full((N, 2), np.nan, dtype=float)    # linear postfit: OminusC - H*x_hat(+)
+        postfit_nl = np.full((N, 2), np.nan, dtype=float)   # nonlinear postfit: Y - h(X_pf)
 
-        # init
-        self.xhat[:] = 0.0
-        self.Phat = np.array(self.P0, dtype = float).copy()
-        self.Xhat = self.X0_star + self.xhat
-        Phat_hist = np.zeros((mcount, 6, 6), dtype=float)
+        X_pf  = np.full((N, 6), np.nan, dtype=float)        # post-fit state solution
+        P_meas = np.full((N, 6, 6), np.nan, dtype=float)    # post-fit covariance (3D)
+        P_pf  = np.full((N, 36), np.nan, dtype=float)       # MATLAB reshape(Covariance)
+        two_sigma = np.full((N, 6), np.nan, dtype=float)
 
+        state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
 
-        for i, m in enumerate(all_meas_sorted):
-            t_i = float(m["t"])
-            st = station_map[m["station"]]
+        # -----------------------------
+        # 3) Init filter vars (locals)
+        # -----------------------------
+        x_hat = np.zeros(6, dtype=float)                    # error-state estimate
+        P = np.array(self.P0, dtype=float).copy()           # error-state covariance
 
-            Xstar_i = Xstar_hist[i, :]
-            Phi_i_im1 = Phi_step[i, :, :]
+        # -----------------------------
+        # 4) Main filter loop
+        # -----------------------------
+        for j in range(N):
 
-            # TIME UPDATE
-            self.xbar = Phi_i_im1 @ self.xhat
-            Pbar_i = Phi_i_im1 @ self.Phat @ Phi_i_im1.T + self.Q
+            t = float(t_meas[j])
+            st = station_map[st_meas[j]]
 
-            # measurement vector
-            Y_i = np.array([m["rho_km"], m["rho_dot_km_s"]], dtype=float)
+            Y = np.array([all_meas[j]["rho_km"], all_meas[j]["rho_dot_km_s"]], dtype=float)
+            Xstar = Xstar_hist[j, :]
+            Phi = Phi_step[j, :, :]
 
-            # If station not visible / masked measurement, skip update
-            Gstar_i = self.G(st, Xstar_i, t_i)
-            if Gstar_i is None:
-                self.xhat = self.xbar
-                self.Phat = Pbar_i
-                Phat_hist[i, :, :] = self.Phat
-                self.Xhat = Xstar_i + self.xhat
+            # ---- Time Update (error-state) ----
+            xbar = Phi @ x_hat
+            Pbar = Phi @ P @ Phi.T + self.Q
 
-                Xhat_hist[i, :] = self.Xhat
-                two_sigma[i, :] = 2.0 * np.sqrt(np.maximum(np.diag(self.Phat), 0.0))
-                postfit_resids[i, :] = np.array([np.nan, np.nan], dtype=float)
+            # ---- Observation at reference ----
+            C = self.G(st, Xstar, t)
+            if C is not None:
 
-                self.log_epoch(t_i, postfit_resid=postfit_resids[i, :],
-                               Xtrue=(None if Xtrue_meas is None else Xtrue_meas[i, :]))
+                # Prefit residual (MATLAB "residuals"): OminusC
+                OminusC = Y - C
+                residuals[j, :] = OminusC
+
+                # Linearize measurement about reference X*
+                Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
+                Htilde = H_range_rangerate(Xstar[:3], Xstar[3:], Rs, Vs)  # (2,6)
+
+                # Kalman gain
+                S = Htilde @ Pbar @ Htilde.T + self.R
+                K = Pbar @ Htilde.T @ np.linalg.solve(S, np.eye(2))
+
+                # ---- Measurement Update (Tapley / MATLAB form) ----
+                x_hat = xbar + K @ (OminusC - Htilde @ xbar)
+
+                A = np.eye(6) - K @ Htilde
+                P = A @ Pbar @ A.T + K @ self.R @ K.T  # Joseph
+
+                # Linear post-fit residual (MATLAB "resid_pf")
+                resid_pf[j, :] = OminusC - (Htilde @ x_hat)
+
             else:
-                # prefit residual at reference (used internally)
-                y_i = Y_i - Gstar_i
+                # No measurement update
+                x_hat = xbar
+                P = Pbar
 
-                # measurement partials at reference
-                v_zero = np.zeros(3)
-                Rs, Vs, _ = st.ecef2eci(t_i, st.r_ecef, v_zero)
-                Htilde_i = H_range_rangerate(Xstar_i[:3], Xstar_i[3:], Rs, Vs)
+            # ---- Post-fit state + store outputs ----
+            X_post = Xstar + x_hat
+            X_pf[j, :] = X_post
+            P_meas[j, :, :] = P
+            P_pf[j, :] = P.reshape(-1, order="F")  # MATLAB column-major reshape
+            two_sigma[j, :] = 2.0 * np.sqrt(np.maximum(np.diag(P), 0.0))
 
-                # gain
-                S_i = Htilde_i @ Pbar_i @ Htilde_i.T + self.R
-                K_i = Pbar_i @ Htilde_i.T @ np.linalg.solve(S_i, np.eye(S_i.shape[0]))
-
-                # update
-                self.xhat = self.xbar + K_i @ (y_i - Htilde_i @ self.xbar)
-
-                I6 = np.eye(6)
-                self.Phat = (I6 - K_i @ Htilde_i) @ Pbar_i @ (I6 - K_i @ Htilde_i).T + K_i @ self.R @ K_i.T
-                Phat_hist[i, :, :] = self.Phat
-                self.Xhat = Xstar_i + self.xhat
-                Xhat_hist[i, :] = self.Xhat
-                two_sigma[i, :] = 2.0 * np.sqrt(np.maximum(np.diag(self.Phat), 0.0))
-
-                # NONLINEAR post-fit residual for HW2:
-                #   r_i^+ = Y_i - G(Xhat_i, t_i)
-                Ghat_i = self.G(st, self.Xhat, t_i)
-                r_post = (Y_i - Ghat_i) if (Ghat_i is not None) else np.array([np.nan, np.nan], dtype=float)
-                postfit_resids[i, :] = r_post
-
-                self.log_epoch(t_i, postfit_resid=r_post,
-                               Xtrue=(None if Xtrue_meas is None else Xtrue_meas[i, :]))
+            # Nonlinear post-fit residual (keep)
+            C_post = self.G(st, X_post, t)
+            postfit_nl[j, :] = (Y - C_post) if (C_post is not None) else np.array([np.nan, np.nan], dtype=float)
 
             if state_error is not None:
-                state_error[i, :] = self.Xhat - Xtrue_meas[i, :]
+                state_error[j, :] = X_post - Xtrue_meas[j, :]
 
+            # Keep base-class history consistent with your RMS summary
+            self.Xhat = X_post
+            self.log_epoch(t, postfit_resid=postfit_nl[j, :],
+                        Xtrue=(None if Xtrue_meas is None else Xtrue_meas[j, :]))
+
+        # sync final state back to object
+        self.xhat = x_hat
+        self.Phat = P
+        self.Xhat = X_pf[-1, :]
 
         rms_final = self.print_rms_summary(label="LKF", first_pass_gap_s=self.first_pass_gap_s)
 
         return {
             "t_meas": t_meas,
             "station_meas": st_meas,
-            "Xhat_meas": Xhat_hist,
-            "state_error_meas": state_error,
-            "postfit_resids_meas": postfit_resids,
+
+            # states
+            "xhat_meas": X_pf,
+            "Xhat_meas": X_pf,    # use post-fit state history (what you plot)
+            "X_pf": X_pf,
+
+            # residuals (MATLAB-style + your nonlinear)
+            "prefit_resids_final": residuals,
+            "postfit_resids_linear_final": resid_pf,
+            "postfit_resids_meas": postfit_nl,
+
+            # covariance (both convenient 3D and MATLAB-like 36-vector)
+            "P_meas": P_meas,
+            "Phat_meas": P_meas,  # alias (helps later if you warmstart)
+            "P_pf": P_pf,
+
             "two_sigma_meas": two_sigma,
+            "state_error_meas": state_error,
             "rms_final": rms_final,
-            "Phat_meas": Phat_hist
+            "rms_by_iter": None
         }
 
 
@@ -537,118 +568,130 @@ class ExtendedKalmanFilter(KalmanFilterBase):
 
         return X1_6, Phi_10
 
-    def run(self, all_meas, stations, Xtrue_meas: np.ndarray | None = None, t_prev_init: float | None = None):
+    def run(self, all_meas, stations, Xtrue_meas=None, t_prev_init=None):
+        # -----------------------------
+        # 0) Setup / sort / early exit
+        # -----------------------------
         station_map = {st.name: st for st in stations}
+        all_meas = sorted(all_meas, key=lambda m: float(m["t"]))
+        N = len(all_meas)
 
-        # Sort measurements by time
-        all_meas_sorted = sorted(all_meas, key=lambda m: float(m["t"]))
-        t_meas = np.array([float(m["t"]) for m in all_meas_sorted], dtype=float)
-        st_meas = [m["station"] for m in all_meas_sorted]
-        mcount = len(all_meas_sorted)
-
-        if t_prev_init is None:
-            t_prev = float(t_meas[0])
-        else:
-            t_prev = float(t_prev_init)
+        t_meas = np.array([float(m["t"]) for m in all_meas], dtype=float)
+        st_meas = [m["station"] for m in all_meas]
 
         if Xtrue_meas is not None:
             Xtrue_meas = np.asarray(Xtrue_meas, dtype=float)
-            if Xtrue_meas.shape != (mcount, 6):
-                raise ValueError(f"Xtrue_meas must have shape ({mcount}, 6) aligned with sorted measurement order.")
+            if Xtrue_meas.shape != (N, 6):
+                raise ValueError(f"Xtrue_meas must have shape ({N}, 6) aligned with sorted measurement order.")
 
-        # outputs
-        Xhat_hist = np.zeros((mcount, 6), dtype=float)
-        postfit_resids = np.full((mcount, 2), np.nan, dtype=float)
-        two_sigma = np.full((mcount, 6), np.nan, dtype=float)
-        state_error = None if Xtrue_meas is None else np.zeros((mcount, 6), dtype=float)
+        # -----------------------------
+        # 1) Allocate outputs (MATLAB-style)
+        # -----------------------------
+        residuals = np.full((N, 2), np.nan, dtype=float)     # prefit (OminusC)
+        resid_pf  = np.full((N, 2), np.nan, dtype=float)     # linear postfit
+        postfit_nl = np.full((N, 2), np.nan, dtype=float)    # nonlinear postfit (keep)
 
-        # init
-        self.Xhat = np.asarray(self.Xhat, dtype=float).reshape(6,)
-        self.Phat = np.asarray(self.Phat, dtype=float).reshape(6, 6)
+        X_pf = np.full((N, 6), np.nan, dtype=float)          # post-fit state history
+        P_meas = np.full((N, 6, 6), np.nan, dtype=float)     # post-fit covariance history
+        P_pf = np.full((N, 36), np.nan, dtype=float)         # MATLAB-like reshape(Covariance)
+        two_sigma = np.full((N, 6), np.nan, dtype=float)
 
+        state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
 
+        # -----------------------------
+        # 2) Init filter vars (locals)
+        # -----------------------------
+        X_hat = np.asarray(self.Xhat, dtype=float).reshape(6,)
+        P = np.asarray(self.Phat, dtype=float).reshape(6, 6)
 
-        for i, m in enumerate(all_meas_sorted):
-            t_i = float(m["t"])
-            st = station_map[m["station"]]
+        prev_time = float(t_meas[0]) if t_prev_init is None else float(t_prev_init)
 
-            # 1) TIME UPDATE
-            #  (propagate nonlinear state + STM)
-            #  Use current post state as initial condition
-            Xbar_i, Phi_i_im1 = self._propagate_state_and_stm_step(t_prev, t_i, self.Xhat)
+        # -----------------------------
+        # 3) Main filter loop
+        # -----------------------------
+        for j in range(N):
 
-            Pbar_i = Phi_i_im1 @ self.Phat @ Phi_i_im1.T + self.Q
+            t = float(t_meas[j])
+            st = station_map[st_meas[j]]
+            Y = np.array([all_meas[j]["rho_km"], all_meas[j]["rho_dot_km_s"]], dtype=float)
 
-            # measurement vector
-            Y_i = np.array([m["rho_km"], m["rho_dot_km_s"]], dtype=float)
+            # ---- Time Update (propagate state + STM) ----
+            Xbar, Phi = self._propagate_state_and_stm_step(prev_time, t, X_hat)
+            Pbar = Phi @ P @ Phi.T + self.Q
 
-            # If station not visible / masked measurement, skip update
-            Gbar = self.G(st, Xbar_i, t_i)
-            if Gbar is None:
-                self.Xhat = Xbar_i
-                self.Phat = Pbar_i
+            # ---- Observation / prefit residual ----
+            C = self.G(st, Xbar, t)
+            if C is not None:
 
-                Xhat_hist[i, :] = self.Xhat
-                two_sigma[i, :] = 2.0 * np.sqrt(np.maximum(np.diag(self.Phat), 0.0))
-                postfit_resids[i, :] = np.array([np.nan, np.nan], dtype=float)
+                OminusC = Y - C
+                residuals[j, :] = OminusC
 
-                self.log_epoch(
-                    t_i,
-                    postfit_resid=postfit_resids[i, :],
-                    Xtrue=(None if Xtrue_meas is None else Xtrue_meas[i, :]),
-                )
+                # ---- Linearize measurement ----
+                Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
+                Htilde = H_range_rangerate(Xbar[:3], Xbar[3:], Rs, Vs)
+
+                # ---- Kalman gain ----
+                S = Htilde @ Pbar @ Htilde.T + self.R
+                K = Pbar @ Htilde.T @ np.linalg.solve(S, np.eye(2))
+
+                # ---- Measurement Update ----
+                X_hat = Xbar + K @ OminusC
+                A = np.eye(6) - K @ Htilde
+                P = A @ Pbar @ A.T + K @ self.R @ K.T
+
+                # ---- Linear post-fit residual (MATLAB resid_pf) ----
+                x_hat_err = X_hat - Xbar
+                resid_pf[j, :] = OminusC - (Htilde @ x_hat_err)
+
+                # ---- Nonlinear post-fit residual (keep) ----
+                C_hat = self.G(st, X_hat, t)
+                postfit_nl[j, :] = (Y - C_hat) if (C_hat is not None) else np.array([np.nan, np.nan], dtype=float)
+
             else:
-                # 2) MEASUREMENT UPDATE 
-                y_i = Y_i - Gbar  # innovation about predicted state
+                # No measurement update
+                X_hat, P = Xbar, Pbar
 
-                v_zero = np.zeros(3)
-                Rs, Vs, _ = st.ecef2eci(t_i, st.r_ecef, v_zero)
-                Htilde_i = H_range_rangerate(Xbar_i[:3], Xbar_i[3:], Rs, Vs)
-
-                S_i = Htilde_i @ Pbar_i @ Htilde_i.T + self.R
-
-                # K = Pbar H^T S^{-1} (fancy stable inverse)
-                K_i = Pbar_i @ Htilde_i.T @ np.linalg.solve(S_i, np.eye(S_i.shape[0]))
-
-                # state update
-                self.Xhat = Xbar_i + K_i @ y_i
-
-                # covariance update
-                I6 = np.eye(6)
-                A = (I6 - K_i @ Htilde_i)
-                self.Phat = A @ Pbar_i @ A.T + K_i @ self.R @ K_i.T
-
-                Xhat_hist[i, :] = self.Xhat
-                two_sigma[i, :] = 2.0 * np.sqrt(np.maximum(np.diag(self.Phat), 0.0))
-
-                # NONLINEAR post-fit residual
-                Ghat_i = self.G(st, self.Xhat, t_i)
-                r_post = (Y_i - Ghat_i) if (Ghat_i is not None) else np.array([np.nan, np.nan], dtype=float)
-                postfit_resids[i, :] = r_post
-
-                self.log_epoch(
-                    t_i,
-                    postfit_resid=r_post,
-                    Xtrue=(None if Xtrue_meas is None else Xtrue_meas[i, :]),
-                )
+            # ---- Store outputs (single block) ----
+            X_pf[j, :] = X_hat
+            P_meas[j, :, :] = P
+            P_pf[j, :] = P.reshape(-1, order="F")  # MATLAB-style reshape
+            two_sigma[j, :] = 2.0 * np.sqrt(np.maximum(np.diag(P), 0.0))
 
             if state_error is not None:
-                state_error[i, :] = self.Xhat - Xtrue_meas[i, :]
+                state_error[j, :] = X_hat - Xtrue_meas[j, :]
 
-            # advance
-            t_prev = t_i
+            # advance time
+            prev_time = t
+
+            # log nonlinear postfit into base history (optional)
+            self.Xhat = X_hat
+            self.log_epoch(t, postfit_resid=postfit_nl[j, :],
+                        Xtrue=(None if Xtrue_meas is None else Xtrue_meas[j, :]))
+
+        # sync state back
+        self.Xhat = X_hat
+        self.Phat = P
 
         rms_final = self.print_rms_summary(label="EKF", first_pass_gap_s=self.first_pass_gap_s)
 
         return {
             "t_meas": t_meas,
             "station_meas": st_meas,
-            "Xhat_meas": Xhat_hist,
+            "xhat_meas": X_pf,
+            "Xhat_meas": X_pf,
+            "X_pf": X_pf,
             "state_error_meas": state_error,
-            "postfit_resids_meas": postfit_resids,
+            "prefit_resids_final": residuals,
+            "postfit_resids_linear_final": resid_pf,
+            "postfit_resids_meas": postfit_nl,
+            "P_meas": P_meas,
+            "P_pf": P_pf,
             "two_sigma_meas": two_sigma,
             "rms_final": rms_final,
+            "rms_by_iter": None
         }
+
+
     
     def run_warmstarted(
         self,
