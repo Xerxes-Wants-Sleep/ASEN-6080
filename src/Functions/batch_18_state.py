@@ -54,6 +54,8 @@ def batch_estimate_x0(
 
     dx0_hist = []
     x0_star_hist = [x0_star.copy()]
+    prefit_resids_hist = []
+    postfit_resids_linear_hist = []
 
     # ---- baseline trajectory for *prefit* residuals (friend-style) ----
     X_base, Phi_base = propagate_x_phi_history(
@@ -173,6 +175,16 @@ def batch_estimate_x0(
 
         # Solve for correction and update epoch state
         dx0 = np.linalg.solve(Lambda, N_vec)
+
+        # Linearized postfit residuals: r_pf = r_pre - H*dx0
+        resid_pf = np.full((mcount, 2), np.nan, dtype=float)
+        valid = np.isfinite(OminusC).all(axis=1)
+        if np.any(valid):
+            resid_pf[valid, :] = OminusC[valid, :] - np.einsum("ijk,k->ij", H_store[valid, :, :], dx0)
+
+        prefit_resids_hist.append(OminusC.copy())
+        postfit_resids_linear_hist.append(resid_pf.copy())
+
         x0_star = x0_star + dx0
 
         dx0_hist.append(dx0.copy())
@@ -295,6 +307,8 @@ def batch_estimate_x0(
         "dx0_hist": dx0_hist,
         "x0_star_hist": x0_star_hist,
         "num_iters": len(dx0_hist),
+        "prefit_resids_hist": prefit_resids_hist,                     # list of (m,2)
+        "postfit_resids_linear_hist": postfit_resids_linear_hist,      # list of (m,2)
 
         # final normal eqns
         "Lambda_final": Lambda,

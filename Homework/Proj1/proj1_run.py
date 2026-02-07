@@ -1,5 +1,6 @@
 import numpy as np
 import sys
+from dataclasses import replace
 
 from pathlib import Path
 sys.path.append("../../")
@@ -159,6 +160,28 @@ make_postfit_residuals_linear_plot(result, PLOT_DIR)
 make_postfit_residuals_nonlinear_plot(result, PLOT_DIR)
 make_cov_diag_log_plot(result, PLOT_DIR)
 make_trace_cov_plot(result, PLOT_DIR)
+
+# -----------------------------
+# Per-iteration residual plots (iterations 1-3)
+# -----------------------------
+prefit_hist = info.get("prefit_resids_hist", [])
+postfit_lin_hist = info.get("postfit_resids_linear_hist", [])
+
+scale_m_to_km = 1e-3
+max_iters_to_plot = min(3, len(prefit_hist), len(postfit_lin_hist))
+
+for k in range(max_iters_to_plot):
+    iter_dir = PLOT_DIR / f"Iter_{k+1}"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+
+    result_k = replace(
+        result,
+        prefit_resids_final=np.asarray(prefit_hist[k], dtype=float) * scale_m_to_km,
+        postfit_resids_linear_final=np.asarray(postfit_lin_hist[k], dtype=float) * scale_m_to_km,
+    )
+
+    make_prefit_residuals_plot(result_k, iter_dir)
+    make_postfit_residuals_linear_plot(result_k, iter_dir)
 
 # State error plots require truth
 if result.state_error_meas is not None:
