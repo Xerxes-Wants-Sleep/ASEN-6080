@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.Functions.postprocess_batch_for_plots import postprocess_batch_for_plots
+from src.Functions.postprocess_batch18_for_plots import postprocess_batch18_for_plots
 from .common import rms_nan
 
 
@@ -170,6 +171,84 @@ def run_batch_post_processing(
         result.postfit_resids_linear_final = info.get("postfit_resids_linear_final", None)
 
     # compute RSW errors/cov if truth available
+    if result.state_error_meas is not None:
+        pos_err_rsw, Pdiag_pos_rsw = compute_rsw_errors_and_cov(
+            result.xhat_meas, result.P_meas, result.state_error_meas
+        )
+        result.pos_err_rsw = pos_err_rsw
+        result.Pdiag_pos_rsw = Pdiag_pos_rsw
+
+    return result
+
+
+def run_batch_post_processing_18(
+    *,
+    all_meas,
+    x0_hat: np.ndarray,
+    P0_hat: np.ndarray,
+    info: dict[str, Any],
+    truth_times: np.ndarray | None = None,
+    truth_states_6: np.ndarray | None = None,
+    length_unit_in: str = "m",
+    length_unit_out: str = "km",
+    truth_length_unit: str | None = None,
+    first_pass_gap_s: float = 6 * 3600.0,
+) -> BatchPostProcessResult:
+
+    out = postprocess_batch18_for_plots(
+        all_meas=all_meas,
+        x0_hat=x0_hat,
+        P0_hat=P0_hat,
+        info=info,
+        truth_times=truth_times,
+        truth_states_6=truth_states_6,
+        length_unit_in=length_unit_in,
+        length_unit_out=length_unit_out,
+        truth_length_unit=truth_length_unit,
+        first_pass_gap_s=first_pass_gap_s,
+    )
+
+    result = BatchPostProcessResult(**out)
+
+    # Attach batch info residuals (final iteration aligned)
+    def _pick(info_dict, *keys):
+        for k in keys:
+            if k in info_dict and info_dict[k] is not None:
+                return info_dict[k]
+        return None
+
+    def _length_scale(unit_in: str, unit_out: str) -> float:
+        u_in = str(unit_in).strip().lower()
+        u_out = str(unit_out).strip().lower()
+        to_m = {
+            "m": 1.0,
+            "meter": 1.0,
+            "meters": 1.0,
+            "km": 1000.0,
+            "kilometer": 1000.0,
+            "kilometers": 1000.0,
+        }
+        if u_in not in to_m or u_out not in to_m:
+            raise ValueError(f"Unknown length unit conversion: {unit_in} -> {unit_out}")
+        return to_m[u_in] / to_m[u_out]
+
+    scale = _length_scale(length_unit_in, length_unit_out)
+
+    prefit_raw = _pick(info, "prefit_resids_final", "prefit_residuals")
+    if prefit_raw is not None:
+        result.prefit_resids_final = np.asarray(prefit_raw, dtype=float) * scale
+
+    # Linear postfit may not exist for 18-state; fallback to nonlinear postfit
+    postfit_lin_raw = _pick(
+        info,
+        "postfit_resids_linear_final",
+        "postfit_residuals",
+        "postfit_resids_meas",
+    )
+    if postfit_lin_raw is not None:
+        result.postfit_resids_linear_final = np.asarray(postfit_lin_raw, dtype=float) * scale
+
+    # Compute RSW errors/cov if truth available
     if result.state_error_meas is not None:
         pos_err_rsw, Pdiag_pos_rsw = compute_rsw_errors_and_cov(
             result.xhat_meas, result.P_meas, result.state_error_meas

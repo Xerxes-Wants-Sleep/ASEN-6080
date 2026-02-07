@@ -7,31 +7,40 @@ class Stations:
             name: str,
             lat_deg: float,
             lon_deg: float,
+            theta0_deg: float,
+            radius_earth: float,
+            w_earth_rad_per_s: float,
+            use_ecef: bool = False,
+            r_ecef: np.ndarray | None = None,
             elevation_mask_deg: float = 10,
-            radius_earth: float = 6378,
-            theta0_deg: float = 122,
-            w_earth_rad_per_s: float =2*np.pi/(24*60*60)
+            
         ):
     
         self.name = name
         self.lat_deg = float(lat_deg)
         self.lon_deg = float(lon_deg)
+        self.use_ecef = use_ecef
         self.elevation_mask_deg = float(elevation_mask_deg)
         self.radius_earth = float(radius_earth)
         self.theta0_deg = float(theta0_deg)
         self.w_earth_rad_per_s = float(w_earth_rad_per_s)
-        self.deg2radians()
-        self.r_ecef = self.lat_lon2ecef()
+        self.elevation_mask_rad = float(np.deg2rad(self.elevation_mask_deg))
+        self.theta0_rad = float(np.deg2rad(self.theta0_deg))
+        self.lat_rad = float(np.deg2rad(self.lat_deg))
+        self.lon_rad = float(np.deg2rad(self.lon_deg))
 
 
+        if self.use_ecef:
+            self.r_ecef = np.asarray(r_ecef, dtype=float).reshape(3)
+            # lat/lon not used in this mode, but we keep them for compatibility
+            self.lat_deg = float(lat_deg)
+            self.lon_deg = float(lon_deg)
+        else:
+            self.lat_deg = float(lat_deg)
+            self.lon_deg = float(lon_deg)
+            self.r_ecef = self.lat_lon2ecef()
 
-    def deg2radians(self) -> None:
-        self.lat_rad:float = np.deg2rad(self.lat_deg)
-        self.lon_rad:float = np.deg2rad(self.lon_deg)
-        self.elevation_mask_rad: float = np.deg2rad(self.elevation_mask_deg)
-        self.theta0_rad:float = np.deg2rad(self.theta0_deg)
 
-    
 
     def lat_lon2ecef(self) -> np.ndarray:
         ''''''
@@ -50,17 +59,21 @@ class Stations:
                                 [sin, cos, 0],
                                 [ 0,   0,   1]])
         
-        
         r_eci = R3 @ r_sc_ecef
         v_eci = R3 @ v_sc_ecef + np.cross(np.array([0.0, 0.0, self.w_earth_rad_per_s]), r_eci)
         X_eci = np.hstack([r_eci, v_eci])
 
         return r_eci, v_eci, X_eci
+    
+    def station_eci(self, t: float) -> tuple[np.ndarray, np.ndarray]:
+        """Station position/velocity in ECI at time t."""
+        v_zero = np.zeros(3)
+        r_st, v_st, _ = self.ecef2eci(t, self.r_ecef, v_zero)
+        return r_st, v_st
 
     def elevation(self, t: float, r_sc_eci: np.ndarray) -> float:
 
-        v_zero = np.zeros(3)
-        r_st, _, _ = self.ecef2eci(t, self.r_ecef, v_zero)
+        r_st, _ = self.station_eci(t)
         rho_vec: np.ndarray = r_sc_eci - r_st
         rho_hat: np.ndarray = rho_vec / np.linalg.norm(rho_vec)
         up: np.ndarray = r_st / np.linalg.norm(r_st)
@@ -75,9 +88,7 @@ class Stations:
         if elev < self.elevation_mask_rad:
             return None
         
-        v_zero = np.zeros(3)
-        r_st, v_st, _ = self.ecef2eci(t, self.r_ecef, v_zero)
-
+        r_st, v_st = self.station_eci(t)
         rho_vec = r_sc_eci - r_st
         rho = np.linalg.norm(rho_vec)
         rho_hat = rho_vec / rho
@@ -87,8 +98,8 @@ class Stations:
         return {
         "station": self.name,
         "t": t,
-        "rho_km": rho,
-        "rho_dot_km_s": rho_dot,
+        "rho": float(rho),
+        "rho_dot": float(rho_dot),
         "elev_rad": elev
         }
 

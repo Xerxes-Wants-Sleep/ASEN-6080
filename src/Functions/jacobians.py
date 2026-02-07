@@ -1,5 +1,16 @@
 import numpy as np
+from .atmosphere import rho_exp, grad_rho_exp  # For drag stuff
 
+def skew(w: np.ndarray) -> np.ndarray:
+    """Return the 3x3 skew-symmetric matrix such that skew(w) @ v == w x v."""
+    w = np.asarray(w, dtype=float).reshape(3)
+    wx, wy, wz = w
+    return np.array(
+        [[0.0, -wz, wy],
+         [wz, 0.0, -wx],
+         [-wy, wx, 0.0]],
+        dtype=float,
+    )
 
 def accel_wJ2J3(r, mu, J2, J3, Re=6378, j2=True, j3=True):
     """
@@ -227,3 +238,164 @@ def stm(t, state9: np.ndarray, phi: np.ndarray, rows_col_to_remove: np.ndarray, 
     return np.hstack((dxdt, phi_dot_flat))
 
 
+##### PROJ 1 Addons #####
+
+def stm_generic(
+    t: float,
+    y: np.ndarray,
+    n: int,
+    f,
+    A,
+) -> np.ndarray:
+    """Combined state+STM dynamics for state vector size n
+
+    Parameters
+    ----------
+    t : float
+        Current time.
+    y : (n + n*n,) ndarray
+        Stacked vector [x; Phi_flat] where Phi is (n,n).
+    n : int
+        State dimension.
+    f : callable
+        Dynamics function f(t, x) -> xdot, shape (n,).
+    A : callable
+        Variational matrix function A(t, x) -> d f / d x, shape (n,n).
+
+    Returns
+    -------
+    dy : (n + n*n,) ndarray
+        Stacked derivative [xdot; Phidot_flat].
+    """
+    y = np.asarray(y, dtype=float).reshape(-1)
+    if y.size != n + n * n:
+        raise ValueError(f"stm_generic expected y of length {n + n*n}, got {y.size}.")
+
+    x = y[:n]
+    Phi = y[n:].reshape(n, n)
+
+    xdot = np.asarray(f(t, x), dtype=float).reshape(n)
+    A_mat = np.asarray(A(t, x), dtype=float)
+    if A_mat.shape != (n, n):
+        raise ValueError(f"A(t,x) must be ({n},{n}), got {A_mat.shape}.")
+
+    Phidot = A_mat @ Phi
+    return np.hstack((xdot, Phidot.reshape(-1)))
+
+
+
+
+def accel_drag_exp(
+    r: np.ndarray,
+    v: np.ndarray,
+    Cd: float,
+    area: float,
+    mass: float,
+    rho0: float,
+    r0: float,
+    H: float,
+    omega_vec=None,
+    atmosphere_rotates: bool = True,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Drag acceleration for an exponential density model.
+
+    All inputs must be in consistent units (typically meters, seconds, kg).
+
+    a_drag = -0.5 * rho * Cd * (A/m) * ||v_rel|| * v_rel
+    where v_rel = v - omega x r if atmosphere_rotates=True.
+    """
+    from .atmosphere import rho_exp
+
+    r = np.asarray(r, dtype=float).reshape(3)
+    v = np.asarray(v, dtype=float).reshape(3)
+    omega = np.zeros(3) if omega_vec is None else np.asarray(omega_vec, dtype=float).reshape(3)
+
+    rmag = float(np.linalg.norm(r))
+    rho = float(rho_exp(rmag, rho0=rho0, r0=r0, H=H))
+
+    if atmosphere_rotates:
+        v_rel = v - np.cross(omega, r)
+    else:
+        v_rel = v
+
+    vrel_mag = float(np.linalg.norm(v_rel))
+    if vrel_mag < eps or rho == 0.0:
+        return np.zeros(3)
+
+    k = 0.5 * Cd * area / mass
+    return -k * rho * vrel_mag * v_rel
+
+
+def drag_partials_exp(
+    r: np.ndarray,
+    v: np.ndarray,
+    Cd: float,
+    area: float,
+    mass: float,
+    rho0: float,
+    r0: float,
+    H: float,
+    omega_vec=None,
+    atmosphere_rotates: bool = True,
+    eps: float = 1e-12,
+):
+    """Drag accel and partials for exponential atmosphere.
+
+    Returns
+    -------
+    a_drag : (3,) ndarray
+    dadr   : (3,3) ndarray
+        Partial of drag acceleration wrt position r.
+    dadv   : (3,3) ndarray
+        Partial of drag acceleration wrt velocity v.
+    dadCd  : (3,) ndarray
+        Partial of drag acceleration wrt Cd.
+    """
+    from .atmosphere import rho_exp, grad_rho_exp
+
+    r = np.asarray(r, dtype=float).reshape(3)
+    v = np.asarray(v, dtype=float).reshape(3)
+    omega = np.zeros(3) if omega_vec is None else np.asarray(omega_vec, dtype=float).reshape(3)
+
+    rmag = float(np.linalg.norm(r))
+    rho = float(rho_exp(rmag, rho0=rho0, r0=r0, H=H))
+    grad_rho = np.asarray(grad_rho_exp(r, rho0=rho0, r0=r0, H=H, eps=eps), dtype=float).reshape(3)
+
+    if atmosphere_rotates:
+        B = -skew(omega)  # du/dr (u = v - omega x r)
+        u = v - np.cross(omega, r)
+    else:
+        B = np.zeros((3, 3))
+        u = v
+
+    vrel = float(np.linalg.norm(u))
+    if vrel < eps or rho == 0.0:
+        a = np.zeros(3)
+        return a, np.zeros((3, 3)), np.zeros((3, 3)), np.zeros(3)
+
+    k = 0.5 * Cd * area / mass
+    I = np.eye(3)
+
+    # g(u) = ||u|| * u
+    g = vrel * u
+    M = (np.outer(u, u) / vrel) + vrel * I  # dg/du
+
+    # a = -k * rho * g
+    a = -k * rho * g
+
+    # da/dv = -k * rho * dg/du * du/dv, with du/dv = I
+    dadv = -k * rho * M
+
+    # da/dr = -k * ( g ⊗ grad_rho + rho * dg/du * du/dr )
+    dgdr = M @ B
+    dadr = -k * (np.outer(g, grad_rho) + rho * dgdr)
+
+    # da/dCd
+    if abs(Cd) > eps:
+        dadCd = a / Cd
+    else:
+        # limit as Cd->0 (rare, but avoids division-by-zero)
+        dadCd = -0.5 * rho * (area / mass) * g
+
+    return a, dadr, dadv, dadCd

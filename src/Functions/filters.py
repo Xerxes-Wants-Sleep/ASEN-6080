@@ -315,7 +315,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
         Phi_step = self.phi_i0_to_phi_step(Phi_i0_hist)                         # Phi(t_i,t_{i-1})
 
         # -----------------------------
-        # 2) Allocate outputs (MATLAB-style)
+        # 2) Allocate outputs
         # -----------------------------
         residuals = np.full((N, 2), np.nan, dtype=float)    # prefit: OminusC
         resid_pf  = np.full((N, 2), np.nan, dtype=float)    # linear postfit: OminusC - H*x_hat(+)
@@ -323,7 +323,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
 
         X_pf  = np.full((N, 6), np.nan, dtype=float)        # post-fit state solution
         P_meas = np.full((N, 6, 6), np.nan, dtype=float)    # post-fit covariance (3D)
-        P_pf  = np.full((N, 36), np.nan, dtype=float)       # MATLAB reshape(Covariance)
+        P_pf  = np.full((N, 36), np.nan, dtype=float)       # Reshape(Covariance)
         two_sigma = np.full((N, 6), np.nan, dtype=float)
 
         state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
@@ -354,7 +354,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             C = self.G(st, Xstar, t)
             if C is not None:
 
-                # Prefit residual (MATLAB "residuals"): OminusC
+                # Prefit residual 
                 OminusC = Y - C
                 residuals[j, :] = OminusC
 
@@ -366,13 +366,13 @@ class LinearizedKalmanFilter(KalmanFilterBase):
                 S = Htilde @ Pbar @ Htilde.T + self.R
                 K = Pbar @ Htilde.T @ np.linalg.solve(S, np.eye(2))
 
-                # ---- Measurement Update (Tapley / MATLAB form) ----
+                # ---- Measurement Update
                 x_hat = xbar + K @ (OminusC - Htilde @ xbar)
 
                 A = np.eye(6) - K @ Htilde
                 P = A @ Pbar @ A.T + K @ self.R @ K.T  # Joseph
 
-                # Linear post-fit residual (MATLAB "resid_pf")
+                # Linear post-fit residual 
                 resid_pf[j, :] = OminusC - (Htilde @ x_hat)
 
             else:
@@ -384,7 +384,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             X_post = Xstar + x_hat
             X_pf[j, :] = X_post
             P_meas[j, :, :] = P
-            P_pf[j, :] = P.reshape(-1, order="F")  # MATLAB column-major reshape
+            P_pf[j, :] = P.reshape(-1, order="F")  
             two_sigma[j, :] = 2.0 * np.sqrt(np.maximum(np.diag(P), 0.0))
 
             # Nonlinear post-fit residual (keep)
@@ -415,12 +415,12 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             "Xhat_meas": X_pf,    # use post-fit state history (what you plot)
             "X_pf": X_pf,
 
-            # residuals (MATLAB-style + your nonlinear)
+            # residuals 
             "prefit_resids_final": residuals,
             "postfit_resids_linear_final": resid_pf,
             "postfit_resids_meas": postfit_nl,
 
-            # covariance (both convenient 3D and MATLAB-like 36-vector)
+            # covariance
             "P_meas": P_meas,
             "Phat_meas": P_meas,  # alias (helps later if you warmstart)
             "P_pf": P_pf,
@@ -585,7 +585,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
                 raise ValueError(f"Xtrue_meas must have shape ({N}, 6) aligned with sorted measurement order.")
 
         # -----------------------------
-        # 1) Allocate outputs (MATLAB-style)
+        # 1) Allocate outputs
         # -----------------------------
         residuals = np.full((N, 2), np.nan, dtype=float)     # prefit (OminusC)
         resid_pf  = np.full((N, 2), np.nan, dtype=float)     # linear postfit
@@ -593,7 +593,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
 
         X_pf = np.full((N, 6), np.nan, dtype=float)          # post-fit state history
         P_meas = np.full((N, 6, 6), np.nan, dtype=float)     # post-fit covariance history
-        P_pf = np.full((N, 36), np.nan, dtype=float)         # MATLAB-like reshape(Covariance)
+        P_pf = np.full((N, 36), np.nan, dtype=float)        
         two_sigma = np.full((N, 6), np.nan, dtype=float)
 
         state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
@@ -639,7 +639,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
                 A = np.eye(6) - K @ Htilde
                 P = A @ Pbar @ A.T + K @ self.R @ K.T
 
-                # ---- Linear post-fit residual (MATLAB resid_pf) ----
+                # ---- Linear post-fit residual
                 x_hat_err = X_hat - Xbar
                 resid_pf[j, :] = OminusC - (Htilde @ x_hat_err)
 
@@ -654,7 +654,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
             # ---- Store outputs (single block) ----
             X_pf[j, :] = X_hat
             P_meas[j, :, :] = P
-            P_pf[j, :] = P.reshape(-1, order="F")  # MATLAB-style reshape
+            P_pf[j, :] = P.reshape(-1, order="F") 
             two_sigma[j, :] = 2.0 * np.sqrt(np.maximum(np.diag(P), 0.0))
 
             if state_error is not None:
@@ -702,17 +702,18 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         Xtrue_meas: np.ndarray | None = None,
     ):
         """
-        Warm-start EKF using an LKF initialization on the first num_init_meas measurements.
+        Warm-start EKF using LKF on the first num_init_meas observations.
 
-        Steps:
-          1) Sort measurements by time
-          2) Run LKF on first N meas
-          3) Set EKF initial (Xhat, Phat) = last LKF estimate
-          4) Run EKF on remaining meas, using t_prev_init = last LKF time
-          5) Return combined history + both sub-outputs
+        
+        - run a filter to get a posterior (state + covariance) at some time
+        - use that posterior as the next filter's initial condition
+        - continue from that time forward
+
+        Returns a SINGLE combined output dict with the same keys the batch
+        plotting pipeline expects (so run_filter_post_processing() works).
         """
 
-        # ---- sort once here so LKF and EKF split consistently ----
+        # ---- sort once so the split is consistent ----
         all_meas_sorted = sorted(all_meas, key=lambda m: float(m["t"]))
         mcount = len(all_meas_sorted)
 
@@ -723,105 +724,153 @@ class ExtendedKalmanFilter(KalmanFilterBase):
                 "t_meas": np.array([], dtype=float),
                 "station_meas": [],
                 "Xhat_meas": np.empty((0, 6), dtype=float),
-                "state_error_meas": None,
-                "postfit_resids_meas": np.empty((0, 2), dtype=float),
+                "xhat_meas": np.empty((0, 6), dtype=float),
+                "P_meas": np.empty((0, 6, 6), dtype=float),
                 "two_sigma_meas": np.empty((0, 6), dtype=float),
-                "rms_combined": None,
+                "state_error_meas": None,
+                "prefit_resids_final": np.empty((0, 2), dtype=float),
+                "postfit_resids_linear_final": np.empty((0, 2), dtype=float),
+                "postfit_resids_meas": np.empty((0, 2), dtype=float),
+                "P_pf": np.empty((0, 36), dtype=float),
+                "rms_final": None,
+                "rms_by_iter": None,
             }
 
-        N = int(num_init_meas)
-        if N <= 0:
-            # no warmstart; just run EKF normally
-            return self.run(all_meas_sorted, stations, Xtrue_meas=Xtrue_meas, t_prev_init=None)
-
-        N = min(N, mcount)
-        init_meas = all_meas_sorted[:N]
-        rest_meas = all_meas_sorted[N:]
-
-        # Truth slicing: assumes Xtrue_meas is ALREADY aligned with sorted measurement order
-        Xtrue_init = None
-        Xtrue_rest = None
+        # Truth must be aligned to the *same sorted order*
         if Xtrue_meas is not None:
             Xtrue_meas = np.asarray(Xtrue_meas, dtype=float)
             if Xtrue_meas.shape != (mcount, 6):
-                raise ValueError(f"Xtrue_meas must have shape ({mcount}, 6) aligned with sorted measurement order.")
-            Xtrue_init = Xtrue_meas[:N, :]
-            Xtrue_rest = Xtrue_meas[N:, :]
+                raise ValueError(
+                    f"Xtrue_meas must have shape ({mcount}, 6) aligned with sorted measurement order."
+                )
 
-        # ---- reset histories so repeated runs don't append ----
+        # ---- choose init length ----
+        Ninit = int(num_init_meas)
+        if Ninit <= 0:
+            # no warmstart; just run EKF normally on all measurements
+            return self.run(all_meas_sorted, stations, Xtrue_meas=Xtrue_meas, t_prev_init=None)
+
+        Ninit = min(Ninit, mcount)
+
+        init_meas = all_meas_sorted[:Ninit]
+        rest_meas = all_meas_sorted[Ninit:]
+
+        Xtrue_init = None
+        Xtrue_rest = None
+        if Xtrue_meas is not None:
+            Xtrue_init = Xtrue_meas[:Ninit, :]
+            Xtrue_rest = Xtrue_meas[Ninit:, :]
+
+        # ---- reset histories so repeat calls don’t append ----
         if hasattr(lkf, "reset_history"):
             lkf.reset_history()
-        self.reset_history()
+        if hasattr(self, "reset_history"):
+            self.reset_history()
 
-        # ---- 1) Run LKF init ----
+        # ------------------------------------------------------------
+        # 1) Run LKF on first chunk
+        # ------------------------------------------------------------
         lkf_out = lkf.run(init_meas, stations, Xtrue_meas=Xtrue_init)
 
-        # Pull last LKF posterior as EKF start
+        # Pull last LKF posterior state
         X_start = np.asarray(lkf_out["Xhat_meas"][-1], dtype=float).reshape(6,)
-        P_start = np.asarray(lkf_out["Phat_meas"][-1], dtype=float).reshape(6, 6)
+
+        # Pull last LKF posterior covariance
+        # (your LKF returns P_meas and also aliases Phat_meas)
+        P_hist = lkf_out.get("P_meas", None)
+        if P_hist is None:
+            P_hist = lkf_out.get("Phat_meas", None)
+        if P_hist is None:
+            raise KeyError("LKF output is missing P_meas/Phat_meas needed for warmstart.")
+
+        P_start = np.asarray(P_hist[-1], dtype=float).reshape(6, 6)
+
         t_start = float(lkf_out["t_meas"][-1])
 
-        # ---- 2) Initialize EKF with LKF posterior ----
+        # ------------------------------------------------------------
+        # 2) Initialize EKF at LKF posterior
+        # ------------------------------------------------------------
         self.Xhat = X_start.copy()
         self.Phat = P_start.copy()
 
-        # If there's nothing left, just return LKF as the "combined"
+        # If there’s nothing left to run, just return the LKF output
         if len(rest_meas) == 0:
-            t_comb = np.asarray(lkf_out["t_meas"], dtype=float)
-            post_comb = np.asarray(lkf_out["postfit_resids_meas"], dtype=float)
-            err_comb = None if lkf_out["state_error_meas"] is None else np.asarray(lkf_out["state_error_meas"], dtype=float)
+            # make sure keys match the pipeline expectations
+            out_comb = dict(lkf_out)
+            out_comb["xhat_meas"] = out_comb.get("xhat_meas", out_comb["Xhat_meas"])
+            out_comb["rms_final"] = out_comb.get("rms_final", None)
+            out_comb["rms_by_iter"] = None
+            out_comb["lkf_init"] = lkf_out
+            out_comb["ekf"] = None
+            out_comb["t_start_ekf"] = t_start
+            return out_comb
 
-            rms_combined = KalmanFilterBase.compute_rms_summary_from_arrays(
-                t=t_comb,
-                postfit=post_comb,
-                state_err=err_comb,
-                first_pass_gap_s=self.first_pass_gap_s,
-            )
-
-            return {
-                "lkf_init": lkf_out,
-                "ekf": None,
-                "t_meas": t_comb,
-                "station_meas": lkf_out["station_meas"],
-                "Xhat_meas": lkf_out["Xhat_meas"],
-                "state_error_meas": lkf_out["state_error_meas"],
-                "postfit_resids_meas": lkf_out["postfit_resids_meas"],
-                "two_sigma_meas": lkf_out["two_sigma_meas"],
-                "rms_combined": rms_combined,
-                "t_start_ekf": t_start,
-            }
-
-        # ---- 3) Run EKF from where LKF left off ----
+        # ------------------------------------------------------------
+        # 3) Run EKF on remaining chunk starting from t_start
+        # ------------------------------------------------------------
         ekf_out = self.run(rest_meas, stations, Xtrue_meas=Xtrue_rest, t_prev_init=t_start)
 
-        # ---- 4) Stitch outputs ----
+        # ------------------------------------------------------------
+        # 4) Stitch outputs into ONE dict (batch-plot compatible)
+        # ------------------------------------------------------------
         t_comb = np.hstack([lkf_out["t_meas"], ekf_out["t_meas"]])
-        station_comb = lkf_out["station_meas"] + ekf_out["station_meas"]
+        station_comb = list(lkf_out["station_meas"]) + list(ekf_out["station_meas"])
+
         Xhat_comb = np.vstack([lkf_out["Xhat_meas"], ekf_out["Xhat_meas"]])
-        post_comb = np.vstack([lkf_out["postfit_resids_meas"], ekf_out["postfit_resids_meas"]])
+
+        P_meas_lkf = lkf_out.get("P_meas", lkf_out.get("Phat_meas"))
+        P_meas_ekf = ekf_out.get("P_meas", None)
+        if P_meas_ekf is None:
+            raise KeyError("EKF output is missing P_meas; needed for combined plots.")
+        P_meas_comb = np.concatenate([P_meas_lkf, P_meas_ekf], axis=0)
+
         two_sigma_comb = np.vstack([lkf_out["two_sigma_meas"], ekf_out["two_sigma_meas"]])
+
+        prefit_comb = np.vstack([lkf_out["prefit_resids_final"], ekf_out["prefit_resids_final"]])
+        postfit_lin_comb = np.vstack([lkf_out["postfit_resids_linear_final"], ekf_out["postfit_resids_linear_final"]])
+        postfit_nl_comb = np.vstack([lkf_out["postfit_resids_meas"], ekf_out["postfit_resids_meas"]])
+
+        Ppf_lkf = lkf_out.get("P_pf", None)
+        Ppf_ekf = ekf_out.get("P_pf", None)
+        if Ppf_lkf is None or Ppf_ekf is None:
+            # not strictly required for your plots, but nice to keep consistent
+            P_pf_comb = None
+        else:
+            P_pf_comb = np.vstack([Ppf_lkf, Ppf_ekf])
 
         if Xtrue_meas is None:
             err_comb = None
         else:
             err_comb = np.vstack([lkf_out["state_error_meas"], ekf_out["state_error_meas"]])
 
+        # Combined RMS using your helper (keeps same structure as batch)
         rms_combined = KalmanFilterBase.compute_rms_summary_from_arrays(
             t=t_comb,
-            postfit=post_comb,
+            postfit=postfit_nl_comb,
             state_err=err_comb,
             first_pass_gap_s=self.first_pass_gap_s,
         )
 
         return {
+            # debug / optional
             "lkf_init": lkf_out,
             "ekf": ekf_out,
             "t_start_ekf": t_start,
+
+            # batch-plot compatible keys
             "t_meas": t_comb,
             "station_meas": station_comb,
             "Xhat_meas": Xhat_comb,
-            "state_error_meas": err_comb,
-            "postfit_resids_meas": post_comb,
+            "xhat_meas": Xhat_comb,   # alias for your post_processing dataclass
+            "P_meas": P_meas_comb,
             "two_sigma_meas": two_sigma_comb,
-            "rms_combined": rms_combined,
+            "state_error_meas": err_comb,
+
+            "prefit_resids_final": prefit_comb,
+            "postfit_resids_linear_final": postfit_lin_comb,
+            "postfit_resids_meas": postfit_nl_comb,
+
+            "P_pf": P_pf_comb,
+            "rms_final": rms_combined,
+            "rms_by_iter": None,
         }
