@@ -7,7 +7,7 @@ sys.path.append("../../")
 
 from src.Functions.batch_18_state import batch_estimate_x0
 from src.Functions.dynamics_muJ2_drag import f_muJ2_drag, A_muJ2_drag
-from src.Functions.propagation import PropSettings
+from src.Functions.propagation import PropSettings, propagate_x_phi_history
 
 from src.helpers.plotting.post_processing import run_batch_post_processing_18, print_rms_summary
 from src.helpers.plotting.plot_prefit_residuals import make_prefit_residuals_plot
@@ -17,6 +17,8 @@ from src.helpers.plotting.plot_cov_diag_log import make_cov_diag_log_plot
 from src.helpers.plotting.plot_trace_cov import make_trace_cov_plot
 from src.helpers.plotting.plot_state_errors_eci import make_state_errors_eci_plots
 from src.helpers.plotting.plot_state_errors_rsw import make_state_errors_rsw_plot
+from src.helpers.plotting.plot_trace_cov_pos_vel import make_trace_cov_pos_vel_plot
+from src.helpers.plotting.plot_cov_ellipsoid import plot_cov_ellipsoid
 
 
 # -----------------------------
@@ -160,32 +162,65 @@ make_postfit_residuals_linear_plot(result, PLOT_DIR)
 make_postfit_residuals_nonlinear_plot(result, PLOT_DIR)
 make_cov_diag_log_plot(result, PLOT_DIR)
 make_trace_cov_plot(result, PLOT_DIR)
+make_trace_cov_pos_vel_plot(result, PLOT_DIR)
+plot_cov_ellipsoid(result, PLOT_DIR)
 
 # -----------------------------
-# Per-iteration residual plots (iterations 1-3)
+# Per-iteration plots (iterations 1-3)
 # -----------------------------
 prefit_hist = info.get("prefit_resids_hist", [])
 postfit_lin_hist = info.get("postfit_resids_linear_hist", [])
+Lambda_hist = info.get("Lambda_hist", [])
+x0_star_hist = info.get("x0_star_hist", [])
 
 scale_m_to_km = 1e-3
-max_iters_to_plot = min(3, len(prefit_hist), len(postfit_lin_hist))
+max_iters_to_plot = min(3, len(prefit_hist), len(postfit_lin_hist), len(Lambda_hist))
 
 for k in range(max_iters_to_plot):
     iter_dir = PLOT_DIR / f"Iter_{k+1}"
     iter_dir.mkdir(parents=True, exist_ok=True)
 
+    # Residual plots for this iteration
     result_k = replace(
         result,
         prefit_resids_final=np.asarray(prefit_hist[k], dtype=float) * scale_m_to_km,
         postfit_resids_linear_final=np.asarray(postfit_lin_hist[k], dtype=float) * scale_m_to_km,
     )
-
     make_prefit_residuals_plot(result_k, iter_dir)
     make_postfit_residuals_linear_plot(result_k, iter_dir)
 
-# State error plots require truth
-if result.state_error_meas is not None:
-    make_state_errors_eci_plots(result, PLOT_DIR)
-    make_state_errors_rsw_plot(result, PLOT_DIR)
+    # Propagate this iteration's estimate to build covariance history
+    if len(x0_star_hist) > (k + 1):
+        x0_iter = np.asarray(x0_star_hist[k + 1], dtype=float)
+        P0_iter = np.linalg.inv(np.asarray(Lambda_hist[k], dtype=float))
 
-print(f"\nSaved plots to: {PLOT_DIR}")
+        X_iter, Phi_iter = propagate_x_phi_history(
+            x0=x0_iter,
+            t_eval=t_meas,
+            f=dyn_fun,
+            A=dyn_jac,
+            settings=prop_settings
+        )
+
+        n_iter = X_iter.shape[1]
+        P_hist_iter = np.zeros((len(t_meas), n_iter, n_iter), dtype=float)
+        for i in range(len(t_meas)):
+            Phi_i = Phi_iter[i, :, :]
+            P_hist_iter[i, :, :] = Phi_i @ P0_iter @ Phi_i.T
+
+        X_iter_km = X_iter[:, 0:6] * scale_m_to_km
+        P_iter_km = P_hist_iter[:, 0:6, 0:6] * (scale_m_to_km ** 2)
+
+        result_cov_k = replace(result, xhat_meas=X_iter_km, P_meas=P_iter_km)
+        make_trace_cov_pos_vel_plot(
+            result_cov_k,
+            iter_dir,
+            filename="trace_cov_pos_vel.png",
+            title=f"Trace of Covariance (pos/vel) (Iter {k+1})"
+        )
+        plot_cov_ellipsoid(
+            result_cov_k,
+            iter_dir,
+            filename="final_covariance_ellipsoids_stats.png",
+            title_prefix=f"Iter {k+1}"
+        )

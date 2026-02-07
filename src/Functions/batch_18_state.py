@@ -56,6 +56,7 @@ def batch_estimate_x0(
     x0_star_hist = [x0_star.copy()]
     prefit_resids_hist = []
     postfit_resids_linear_hist = []
+    Lambda_hist = []
 
     # ---- baseline trajectory for *prefit* residuals (friend-style) ----
     X_base, Phi_base = propagate_x_phi_history(
@@ -172,6 +173,9 @@ def batch_estimate_x0(
 
             rms_acum_range += resid[0] ** 2
             rms_acum_rr += resid[1] ** 2
+
+        # Save normal matrix for this iteration (for covariance history)
+        Lambda_hist.append(Lambda.copy())
 
         # Solve for correction and update epoch state
         dx0 = np.linalg.solve(Lambda, N_vec)
@@ -309,6 +313,7 @@ def batch_estimate_x0(
         "num_iters": len(dx0_hist),
         "prefit_resids_hist": prefit_resids_hist,                     # list of (m,2)
         "postfit_resids_linear_hist": postfit_resids_linear_hist,      # list of (m,2)
+        "Lambda_hist": Lambda_hist,                                    # list of (n,n)
 
         # final normal eqns
         "Lambda_final": Lambda,
