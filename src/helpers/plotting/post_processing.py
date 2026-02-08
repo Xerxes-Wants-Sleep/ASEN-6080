@@ -92,21 +92,21 @@ def print_rms_summary(result: BatchPostProcessResult, ignore_first_pass: bool = 
     if result.prefit_resids_final is not None:
         pre = result.prefit_resids_final
         print(f"\nPre-fit residual RMS {suffix}")
-        print(f"  Rho    = {rms_nan(pre[keep, 0]):g} km")
-        print(f"  RhoDot = {rms_nan(pre[keep, 1]):g} km/s")
+        print(f"  Rho    = {rms_nan(pre[keep, 0]):g} m")
+        print(f"  RhoDot = {rms_nan(pre[keep, 1]):g} m/s")
 
     # Linearized postfit (final iter)
     if result.postfit_resids_linear_final is not None:
         pf_lin = result.postfit_resids_linear_final
         print(f"\nLinearized post-fit residual RMS {suffix}")
-        print(f"  Rho    = {rms_nan(pf_lin[keep, 0]):g} km")
-        print(f"  RhoDot = {rms_nan(pf_lin[keep, 1]):g} km/s")
+        print(f"  Rho    = {rms_nan(pf_lin[keep, 0]):g} m")
+        print(f"  RhoDot = {rms_nan(pf_lin[keep, 1]):g} m/s")
 
     # Nonlinear postfit (final estimate propagated)
     pf = result.postfit_resids_meas
     print(f"\nNonlinear post-fit residual RMS {suffix}")
-    print(f"  Rho    = {rms_nan(pf[keep, 0]):g} km")
-    print(f"  RhoDot = {rms_nan(pf[keep, 1]):g} km/s")
+    print(f"  Rho    = {rms_nan(pf[keep, 0]):g} m")
+    print(f"  RhoDot = {rms_nan(pf[keep, 1]):g} m/s")
 
     # State error RMS (if truth provided)
     if result.state_error_meas is not None:
@@ -116,8 +116,8 @@ def print_rms_summary(result: BatchPostProcessResult, ignore_first_pass: bool = 
         rms_vel = rms_nan(np.linalg.norm(e[keep, 3:6], axis=1))
 
         print(f"\nState RMS {suffix}")
-        print(f"  POS 3-norm = {rms_pos:g} km")
-        print(f"  VEL 3-norm = {rms_vel:g} km/s")
+        print(f"  POS 3-norm = {rms_pos:g} m")
+        print(f"  VEL 3-norm = {rms_vel:g} m/s")
 
         if result.pos_err_rsw is not None:
             rms_rsw = np.array([
@@ -126,7 +126,7 @@ def print_rms_summary(result: BatchPostProcessResult, ignore_first_pass: bool = 
                 rms_nan(result.pos_err_rsw[keep, 2]),
             ])
             print(f"\nRSW position component RMS {suffix}")
-            print(f"  R = {rms_rsw[0]:g} km, S = {rms_rsw[1]:g} km, W = {rms_rsw[2]:g} km")
+            print(f"  R = {rms_rsw[0]:g} m, S = {rms_rsw[1]:g} m, W = {rms_rsw[2]:g} m")
 
 
 def run_batch_post_processing(
@@ -190,7 +190,7 @@ def run_batch_post_processing_18(
     truth_times: np.ndarray | None = None,
     truth_states_6: np.ndarray | None = None,
     length_unit_in: str = "m",
-    length_unit_out: str = "km",
+    length_unit_out: str = "m",
     truth_length_unit: str | None = None,
     first_pass_gap_s: float = 6 * 3600.0,
 ) -> BatchPostProcessResult:
@@ -295,6 +295,90 @@ def run_filter_post_processing(*, out: dict) -> BatchPostProcessResult:
 
     if "rms_by_iter" not in d:
         d["rms_by_iter"] = None
+
+    # ---- only pass dataclass fields (ignore extra keys) ----
+    allowed = {f.name for f in fields(BatchPostProcessResult)}
+    payload = {k: d.get(k, None) for k in allowed}
+
+    result = BatchPostProcessResult(**payload)
+
+    # ---- compute RSW fields if truth available ----
+    if result.state_error_meas is not None:
+        pos_err_rsw, Pdiag_pos_rsw = compute_rsw_errors_and_cov(
+            result.xhat_meas, result.P_meas, result.state_error_meas
+        )
+        result.pos_err_rsw = pos_err_rsw
+        result.Pdiag_pos_rsw = Pdiag_pos_rsw
+
+    return result
+
+
+def run_filter_post_processing_18(
+    *,
+    out: dict,
+    length_unit_in: str = "m",
+    length_unit_out: str = "m",
+) -> BatchPostProcessResult:
+    """
+    Convert 18-state filter output into BatchPostProcessResult for plotting.
+    Slices to the first 6 states and converts units (default m -> m).
+    """
+    def _length_scale(unit_in: str, unit_out: str) -> float:
+        u_in = str(unit_in).strip().lower()
+        u_out = str(unit_out).strip().lower()
+        to_m = {
+            "m": 1.0,
+            "meter": 1.0,
+            "meters": 1.0,
+            "km": 1000.0,
+            "kilometer": 1000.0,
+            "kilometers": 1000.0,
+        }
+        if u_in not in to_m or u_out not in to_m:
+            raise ValueError(f"Unknown length unit conversion: {unit_in} -> {unit_out}")
+        return to_m[u_in] / to_m[u_out]
+
+    scale = _length_scale(length_unit_in, length_unit_out)
+
+    d = dict(out)
+
+    # --- aliases ---
+    if "xhat_meas" not in d and "Xhat_meas" in d:
+        d["xhat_meas"] = d["Xhat_meas"]
+    if "P_meas" not in d and "Phat_meas" in d:
+        d["P_meas"] = d["Phat_meas"]
+
+    # --- slice + scale ---
+    if d.get("xhat_meas", None) is not None:
+        xh = np.asarray(d["xhat_meas"], dtype=float)
+        if xh.shape[1] >= 6:
+            d["xhat_meas"] = xh[:, 0:6] * scale
+
+    if d.get("P_meas", None) is not None:
+        Pm = np.asarray(d["P_meas"], dtype=float)
+        if Pm.shape[1] >= 6 and Pm.shape[2] >= 6:
+            d["P_meas"] = Pm[:, 0:6, 0:6] * (scale ** 2)
+
+    if d.get("two_sigma_meas", None) is not None:
+        ts = np.asarray(d["two_sigma_meas"], dtype=float)
+        if ts.shape[1] >= 6:
+            d["two_sigma_meas"] = ts[:, 0:6] * scale
+        else:
+            d["two_sigma_meas"] = ts * scale
+
+    if d.get("state_error_meas", None) is not None:
+        e = np.asarray(d["state_error_meas"], dtype=float)
+        if e.shape[1] >= 6:
+            d["state_error_meas"] = e[:, 0:6] * scale
+
+    # residuals are in length units
+    for k in ("prefit_resids_final", "postfit_resids_linear_final", "postfit_resids_meas"):
+        if d.get(k, None) is not None:
+            d[k] = np.asarray(d[k], dtype=float) * scale
+
+    # P_pf is flattened covariance; scale if present
+    if d.get("P_pf", None) is not None:
+        d["P_pf"] = np.asarray(d["P_pf"], dtype=float) * (scale ** 2)
 
     # ---- only pass dataclass fields (ignore extra keys) ----
     allowed = {f.name for f in fields(BatchPostProcessResult)}

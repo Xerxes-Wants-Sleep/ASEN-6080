@@ -64,7 +64,7 @@ def postprocess_batch18_for_plots(
     truth_times: np.ndarray | None = None,
     truth_states_6: np.ndarray | None = None,
     length_unit_in: str = "m",
-    length_unit_out: str = "km",
+    length_unit_out: str = "m",
     truth_length_unit: str | None = None,
     first_pass_gap_s: float = 6 * 3600.0,
 ):
@@ -76,7 +76,7 @@ def postprocess_batch18_for_plots(
     -----
     - Uses info["state_hist"] and info["P_hist"] from batch_18_state.
     - Only the first 6 states (r,v) are used for plots.
-    - Converts units from length_unit_in -> length_unit_out (default m -> km).
+    - Converts units from length_unit_in -> length_unit_out (default m -> m).
     - If truth is provided, it is interpolated onto measurement times.
     """
 

@@ -20,8 +20,8 @@ def make_postfit_residuals_linear_plot(result: BatchPostProcessResult, outdir: P
         ax[1].plot(t_hr[m], pf[m, 1], ".", label=s, markersize=2)
 
     ax[0].set_title("Linearized Post-fit Residuals")
-    ax[0].set_ylabel("Range [km]")
-    ax[1].set_ylabel("Range-rate [km/s]")
+    ax[0].set_ylabel("Range [m]")
+    ax[1].set_ylabel("Range-rate [m/s]")
     ax[1].set_xlabel("Time [hours]")
     ax[0].legend()
 

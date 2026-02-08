@@ -15,7 +15,7 @@ def make_trace_cov_plot(result: BatchPostProcessResult, outdir: Path, show: bool
     fig = plt.figure()
     plt.semilogy(t_hr, tr, ".", markersize=2)
     plt.xlabel("Time [hours]")
-    plt.ylabel("trace(P)")
+    plt.ylabel("trace(P) [m^2, (m/s)^2]")
     plt.title("Trace of Covariance (log scale)")
 
     savefig(fig, outdir / "trace_cov.png", show=show)

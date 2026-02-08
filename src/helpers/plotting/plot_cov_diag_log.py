@@ -16,7 +16,7 @@ def make_cov_diag_log_plot(result: BatchPostProcessResult, outdir: Path, show: b
     for i in range(6):
         plt.semilogy(t_hr, sig[:, i], "-o", markersize=1)
     plt.xlabel("Time [hours]")
-    plt.ylabel(r"$\sigma$ [km, km/s]")
+    plt.ylabel(r"$\sigma$ [m, m/s]")
     plt.title("Covariance Diagonal (1σ) in Log Scale")
     plt.legend(["x", "y", "z", "vx", "vy", "vz"])
 

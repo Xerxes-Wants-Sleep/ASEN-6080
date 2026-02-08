@@ -1,22 +1,19 @@
 import numpy as np
 import sys
-from dataclasses import replace
 
 from pathlib import Path
 sys.path.append("../../")
 
-from src.Functions.batch_18_state import batch_estimate_x0
+from src.Functions.filter_18_state import LinearizedKalmanFilter18State
 from src.Functions.dynamics_muJ2_drag import f_muJ2_drag, A_muJ2_drag
-from src.Functions.propagation import PropSettings, propagate_x_phi_history
+from src.Functions.propagation import PropSettings
 
-from src.helpers.plotting.post_processing import run_batch_post_processing_18, print_rms_summary
+from src.helpers.plotting.post_processing import run_filter_post_processing_18, print_rms_summary
 from src.helpers.plotting.plot_prefit_residuals import make_prefit_residuals_plot
 from src.helpers.plotting.plot_postfit_residuals_linear import make_postfit_residuals_linear_plot
 from src.helpers.plotting.plot_postfit_residuals_nonlinear import make_postfit_residuals_nonlinear_plot
 from src.helpers.plotting.plot_cov_diag_log import make_cov_diag_log_plot
 from src.helpers.plotting.plot_trace_cov import make_trace_cov_plot
-from src.helpers.plotting.plot_state_errors_eci import make_state_errors_eci_plots
-from src.helpers.plotting.plot_state_errors_rsw import make_state_errors_rsw_plot
 from src.helpers.plotting.plot_trace_cov_pos_vel import make_trace_cov_pos_vel_plot
 from src.helpers.plotting.plot_cov_ellipsoid import plot_cov_ellipsoid
 
@@ -78,26 +75,25 @@ Rs_337 = np.array([3860910.0, 3238490.0, 3898094.0], dtype=float)
 Rs_394 = np.array([549505.0, -1380872.0, 6182197.0], dtype=float)
 
 # -----------------------------
-# Initial guess 
+# Initial guess
 # -----------------------------
 r0 = np.array([757700.0, 5222607.0, 4851500.0], dtype=float)
-v0 = np.array([2213.21, 4678.34, -5371.30394], dtype=float)
+v0 = np.array([2213.21, 4678.34, -5371.30], dtype=float)
 mu0 = 3.986004415e14
 J2_0 = 1.082626925638815e-3
-Cd0 = 2.2
+Cd0 = 2
 
-x0_bar = np.hstack([r0, v0, mu0, J2_0, Cd0, Rs_101, Rs_337, Rs_394])
+X0_star = np.hstack([r0, v0, mu0, J2_0, Cd0, Rs_101, Rs_337, Rs_394])
 
 # -----------------------------
 # Measurement noise
-# TODO: update these sigmas if different
 # -----------------------------
 sigma_rho_m = 0.01      # 1 cm
 sigma_rhod_m_s = 0.001  # 1 mm/s
 R = np.diag([sigma_rho_m**2, sigma_rhod_m_s**2])
 
 # -----------------------------
-# A priori covariance 
+# A priori covariance
 # -----------------------------
 P0_diag = (
     [1e6] * 6 +          # r,v
@@ -108,45 +104,30 @@ P0_diag = (
 P0 = np.diag(P0_diag)
 
 # -----------------------------
-# Run batch (18-state)
+# Process noise (set to zero by default)
 # -----------------------------
-x0_hat, P0_hat, info = batch_estimate_x0(
-    all_meas=all_meas,
-    stations=[],  # not used in 18-state mode
-    x0_bar=x0_bar,
+Q = np.zeros((18, 18), dtype=float)
+
+# -----------------------------
+# Run LKF (18-state)
+# -----------------------------
+lkf = LinearizedKalmanFilter18State(
+    X0_star=X0_star,
     P0=P0,
     R=R,
+    Q=Q,
     dyn_fun=dyn_fun,
     dyn_jac=dyn_jac,
     station_state_map=station_state_map,
-    max_iter=3,
-    tol=1e-8,
     prop_settings=prop_settings,
     station_start_index=9,
     num_stations=3,
     omega_vec=omega_vec,
 )
 
-print("\n=== Batch finished (18-state) ===")
-print("num_iters:", info["num_iters"])
-print("x0_hat (first 6):", x0_hat[:6])
-print("diag(P0_hat) (first 6):", np.diag(P0_hat)[:6])
+out = lkf.run(all_meas, stations=None, Xtrue_meas=None)
 
-# -----------------------------
-# Post-process + RMS prints
-# -----------------------------
-result = run_batch_post_processing_18(
-    all_meas=all_meas,
-    x0_hat=x0_hat,
-    P0_hat=P0_hat,
-    info=info,
-    truth_times=None,
-    truth_states_6=None,
-    length_unit_in="m",
-    length_unit_out="km",
-    first_pass_gap_s=6 * 3600.0,
-)
-
+result = run_filter_post_processing_18(out=out, length_unit_in="m", length_unit_out="m")
 print_rms_summary(result, ignore_first_pass=False)
 print_rms_summary(result, ignore_first_pass=True)
 
@@ -154,7 +135,7 @@ print_rms_summary(result, ignore_first_pass=True)
 # Make plots
 # -----------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-PLOT_DIR = SCRIPT_DIR / "Plots" / "Batch_18"
+PLOT_DIR = SCRIPT_DIR / "Plots" / "LKF"
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 make_prefit_residuals_plot(result, PLOT_DIR)
@@ -162,65 +143,7 @@ make_postfit_residuals_linear_plot(result, PLOT_DIR)
 make_postfit_residuals_nonlinear_plot(result, PLOT_DIR)
 make_cov_diag_log_plot(result, PLOT_DIR)
 make_trace_cov_plot(result, PLOT_DIR)
-make_trace_cov_pos_vel_plot(result, PLOT_DIR)
+make_trace_cov_pos_vel_plot(result, PLOT_DIR, length_unit="m")
 plot_cov_ellipsoid(result, PLOT_DIR)
 
-# -----------------------------
-# Per-iteration plots (iterations 1-3)
-# -----------------------------
-prefit_hist = info.get("prefit_resids_hist", [])
-postfit_lin_hist = info.get("postfit_resids_linear_hist", [])
-Lambda_hist = info.get("Lambda_hist", [])
-x0_star_hist = info.get("x0_star_hist", [])
-
-scale_m_to_km = 1e-3
-max_iters_to_plot = min(3, len(prefit_hist), len(postfit_lin_hist), len(Lambda_hist))
-
-for k in range(max_iters_to_plot):
-    iter_dir = PLOT_DIR / f"Iter_{k+1}"
-    iter_dir.mkdir(parents=True, exist_ok=True)
-
-    # Residual plots for this iteration
-    result_k = replace(
-        result,
-        prefit_resids_final=np.asarray(prefit_hist[k], dtype=float) * scale_m_to_km,
-        postfit_resids_linear_final=np.asarray(postfit_lin_hist[k], dtype=float) * scale_m_to_km,
-    )
-    make_prefit_residuals_plot(result_k, iter_dir)
-    make_postfit_residuals_linear_plot(result_k, iter_dir)
-
-    # Propagate this iteration's estimate to build covariance history
-    if len(x0_star_hist) > (k + 1):
-        x0_iter = np.asarray(x0_star_hist[k + 1], dtype=float)
-        P0_iter = np.linalg.inv(np.asarray(Lambda_hist[k], dtype=float))
-
-        X_iter, Phi_iter = propagate_x_phi_history(
-            x0=x0_iter,
-            t_eval=t_meas,
-            f=dyn_fun,
-            A=dyn_jac,
-            settings=prop_settings
-        )
-
-        n_iter = X_iter.shape[1]
-        P_hist_iter = np.zeros((len(t_meas), n_iter, n_iter), dtype=float)
-        for i in range(len(t_meas)):
-            Phi_i = Phi_iter[i, :, :]
-            P_hist_iter[i, :, :] = Phi_i @ P0_iter @ Phi_i.T
-
-        X_iter_km = X_iter[:, 0:6] * scale_m_to_km
-        P_iter_km = P_hist_iter[:, 0:6, 0:6] * (scale_m_to_km ** 2)
-
-        result_cov_k = replace(result, xhat_meas=X_iter_km, P_meas=P_iter_km)
-        make_trace_cov_pos_vel_plot(
-            result_cov_k,
-            iter_dir,
-            filename="trace_cov_pos_vel.png",
-            title=f"Trace of Covariance (pos/vel) (Iter {k+1})"
-        )
-        plot_cov_ellipsoid(
-            result_cov_k,
-            iter_dir,
-            filename="final_covariance_ellipsoids_stats.png",
-            title_prefix=f"Iter {k+1}"
-        )
+print(f"\nSaved plots to: {PLOT_DIR}")

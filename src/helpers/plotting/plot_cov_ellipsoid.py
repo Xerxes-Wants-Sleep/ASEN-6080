@@ -73,9 +73,9 @@ def plot_cov_ellipsoid(
 
     P_final = P_hist[-1]
 
-    # Convert from km and km/s to meters and m/s for nicer axes
-    scale_pos = 1.0e3
-    scale_vel = 1.0e3
+    # P_meas is expected in meters and m/s (no additional scaling here)
+    scale_pos = 1.0
+    scale_vel = 1.0
 
     P_pos = P_final[0:3, 0:3] * (scale_pos ** 2)
     P_vel = P_final[3:6, 3:6] * (scale_vel ** 2)
@@ -107,6 +107,17 @@ def plot_cov_ellipsoid(
             alpha=alphas[s],
             linewidth=0,
             shade=True,
+        )
+        
+        ax1.plot_wireframe(
+            surf[:, :, 0],
+            surf[:, :, 1],
+            surf[:, :, 2],
+            color="#4a4a4a",
+            alpha=0.25,
+            linewidth=0.4,
+            rstride=6,
+            cstride=6,
         )
 
         if s == 3:
@@ -198,6 +209,17 @@ def plot_cov_ellipsoid(
             shade=True,
         )
 
+        ax2.plot_wireframe(
+            surf[:, :, 0],
+            surf[:, :, 1],
+            surf[:, :, 2],
+            color="#4a4a4a",
+            alpha=0.25,
+            linewidth=0.4,
+            rstride=6,
+            cstride=6,
+        )
+
         if s == 3:
             pts, vecs, radii, std_devs = _get_ellipsoid_points(
                 P_vel, s, num_points=800, scatter_sigma=1.0, seed=0
@@ -265,4 +287,5 @@ def plot_cov_ellipsoid(
     ax2.legend(handles=vel_handles, loc="upper right")
 
     plt.tight_layout()
+    plt.show()
     savefig(fig, outdir / filename, show=show)

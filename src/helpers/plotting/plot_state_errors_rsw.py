@@ -21,7 +21,7 @@ def make_state_errors_rsw_plot(result: BatchPostProcessResult, outdir: Path, sho
         ax[i].plot(t_hr, e_rsw[:, i], ".", markersize=2)
         ax[i].plot(t_hr, sig3_rsw[:, i], "r")
         ax[i].plot(t_hr, -sig3_rsw[:, i], "r")
-        ax[i].set_ylabel(f"{labels[i]} [km]")
+        ax[i].set_ylabel(f"{labels[i]} [m]")
     ax[0].set_title("RSW Position Errors with ±3σ")
     ax[-1].set_xlabel("Time [hours]")
     savefig(fig, outdir / "state_errors_pos_rsw.png", show=show)

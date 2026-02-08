@@ -130,7 +130,11 @@ def batch_estimate_x0(
                 rho_dot = float(np.dot(dr, (v_sc - v_gs)) / rho)
 
                 y_comp = np.array([rho, rho_dot], dtype=float)
-
+                if it == 0 and j == 1:   # first outer iteration, second measurement epoch
+                    print(
+                        f"[BATCH] it={it} j={j} t={ti:.3f} st={st_key} "
+                        f"y_pred={y_comp} y_obs={y_obs}"
+                    )
                 # Local H wrt current state (2×n)
                 H_local = H_tilde_range_rangerate_augmented(
                     state=x_curr,
