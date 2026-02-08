@@ -166,4 +166,4 @@ make_trace_cov_plot(result, PLOT_DIR)
 make_trace_cov_pos_vel_plot(result, PLOT_DIR, length_unit="m")
 plot_cov_ellipsoid(result, PLOT_DIR)
 
-print(f\"\nSaved plots to: {PLOT_DIR}\")
+print(f"\nSaved plots to: {PLOT_DIR}")

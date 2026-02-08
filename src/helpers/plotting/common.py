@@ -25,9 +25,16 @@ def station_masks(station_names: list[str]) -> dict[str, np.ndarray]:
     return masks
 
 
-def savefig(fig: plt.Figure, outpath: Path, show: bool = False, dpi: int = 300) -> None:
+def savefig(
+    fig: plt.Figure,
+    outpath: Path,
+    show: bool = False,
+    dpi: int = 300,
+    tight_layout: bool = True,
+) -> None:
     outpath.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
+    if tight_layout:
+        fig.tight_layout()
     fig.savefig(outpath, dpi=dpi)
     if show:
         plt.show()

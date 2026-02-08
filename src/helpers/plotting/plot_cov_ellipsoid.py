@@ -286,6 +286,4 @@ def plot_cov_ellipsoid(
         vel_handles[-1].set_label("v3")
     ax2.legend(handles=vel_handles, loc="upper right")
 
-    plt.tight_layout()
-    plt.show()
-    savefig(fig, outdir / filename, show=show)
+    savefig(fig, outdir / filename, show=show, tight_layout=False)
