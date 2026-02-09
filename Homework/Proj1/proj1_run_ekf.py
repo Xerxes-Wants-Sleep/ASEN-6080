@@ -6,7 +6,7 @@ sys.path.append("../../")
 
 from src.Functions.filter_18_state import ExtendedKalmanFilter18State
 from src.Functions.dynamics_muJ2_drag import f_muJ2_drag, A_muJ2_drag
-from src.Functions.propagation import PropSettings
+from src.Functions.propagation import PropSettings, propagate_x_phi_history
 
 from src.helpers.plotting.post_processing import run_filter_post_processing_18, print_rms_summary
 from src.helpers.plotting.plot_prefit_residuals import make_prefit_residuals_plot
@@ -16,6 +16,7 @@ from src.helpers.plotting.plot_cov_diag_log import make_cov_diag_log_plot
 from src.helpers.plotting.plot_trace_cov import make_trace_cov_plot
 from src.helpers.plotting.plot_trace_cov_pos_vel import make_trace_cov_pos_vel_plot
 from src.helpers.plotting.plot_cov_ellipsoid import plot_cov_ellipsoid
+from src.helpers.plotting.plot_state_errors_18 import make_state_errors_18_plot
 
 
 # -----------------------------
@@ -145,5 +146,24 @@ make_cov_diag_log_plot(result, PLOT_DIR)
 make_trace_cov_plot(result, PLOT_DIR)
 make_trace_cov_pos_vel_plot(result, PLOT_DIR, length_unit="m")
 plot_cov_ellipsoid(result, PLOT_DIR)
+
+# -----------------------------
+# State error (18-state) vs a priori flow
+# -----------------------------
+X_base, _ = propagate_x_phi_history(
+    x0=x0,
+    t_eval=out["t_meas"],
+    f=dyn_fun,
+    A=dyn_jac,
+    settings=prop_settings,
+)
+state_err_18 = X_base - out["X_pf"]
+make_state_errors_18_plot(
+    out["t_meas"],
+    state_err_18,
+    PLOT_DIR,
+    title="EKF State Error (X_ref - X_hat)",
+    filename="state_errors_18_ekf.png",
+)
 
 print(f"\nSaved plots to: {PLOT_DIR}")
