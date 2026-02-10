@@ -26,6 +26,9 @@ class BatchPostProcessResult:
     prefit_resids_final: np.ndarray | None = None
     postfit_resids_linear_final: np.ndarray | None = None
 
+    # measurement covariance (optional, for normalized RMS)
+    R: np.ndarray | None = None
+
     # computed here (if truth available)
     pos_err_rsw: np.ndarray | None = None         # (m,3)
     Pdiag_pos_rsw: np.ndarray | None = None       # (m,3)  (variance diag in RSW for position)
@@ -88,25 +91,59 @@ def print_rms_summary(result: BatchPostProcessResult, ignore_first_pass: bool = 
     keep = keep_ignore if ignore_first_pass else keep_all
     suffix = "(ignore first pass)" if ignore_first_pass else "(all meas)"
 
+    Rinv = None
+    if result.R is not None:
+        Rinv = np.linalg.inv(np.asarray(result.R, dtype=float))
+
+    def rms_norm(resid: np.ndarray | None) -> float | None:
+        if resid is None or Rinv is None:
+            return None
+        r = np.asarray(resid, dtype=float)
+        if r.size == 0:
+            return None
+        norm_sq = np.einsum("ij,jk,ik->i", r, Rinv, r)
+        return float(np.sqrt(np.nanmean(norm_sq)))
+
     # Prefit (final iter) — aligned arrays
     if result.prefit_resids_final is not None:
         pre = result.prefit_resids_final
+        pre_norm = rms_norm(pre[keep, :])
         print(f"\nPre-fit residual RMS {suffix}")
-        print(f"  Rho    = {rms_nan(pre[keep, 0]):g} m")
-        print(f"  RhoDot = {rms_nan(pre[keep, 1]):g} m/s")
+        if pre_norm is None:
+            print(f"  RMS rho = {rms_nan(pre[keep, 0]):g} m | RMS rhodot = {rms_nan(pre[keep, 1]):g} m/s")
+        else:
+            print(
+                f"  RMS rho = {rms_nan(pre[keep, 0]):g} m | "
+                f"RMS rhodot = {rms_nan(pre[keep, 1]):g} m/s | "
+                f"RMS norm = {pre_norm:g}"
+            )
 
     # Linearized postfit (final iter)
     if result.postfit_resids_linear_final is not None:
         pf_lin = result.postfit_resids_linear_final
+        pf_lin_norm = rms_norm(pf_lin[keep, :])
         print(f"\nLinearized post-fit residual RMS {suffix}")
-        print(f"  Rho    = {rms_nan(pf_lin[keep, 0]):g} m")
-        print(f"  RhoDot = {rms_nan(pf_lin[keep, 1]):g} m/s")
+        if pf_lin_norm is None:
+            print(f"  RMS rho = {rms_nan(pf_lin[keep, 0]):g} m | RMS rhodot = {rms_nan(pf_lin[keep, 1]):g} m/s")
+        else:
+            print(
+                f"  RMS rho = {rms_nan(pf_lin[keep, 0]):g} m | "
+                f"RMS rhodot = {rms_nan(pf_lin[keep, 1]):g} m/s | "
+                f"RMS norm = {pf_lin_norm:g}"
+            )
 
     # Nonlinear postfit (final estimate propagated)
     pf = result.postfit_resids_meas
+    pf_norm = rms_norm(pf[keep, :])
     print(f"\nNonlinear post-fit residual RMS {suffix}")
-    print(f"  Rho    = {rms_nan(pf[keep, 0]):g} m")
-    print(f"  RhoDot = {rms_nan(pf[keep, 1]):g} m/s")
+    if pf_norm is None:
+        print(f"  RMS rho = {rms_nan(pf[keep, 0]):g} m | RMS rhodot = {rms_nan(pf[keep, 1]):g} m/s")
+    else:
+        print(
+            f"  RMS rho = {rms_nan(pf[keep, 0]):g} m | "
+            f"RMS rhodot = {rms_nan(pf[keep, 1]):g} m/s | "
+            f"RMS norm = {pf_norm:g}"
+        )
 
     # State error RMS (if truth provided)
     if result.state_error_meas is not None:
@@ -375,6 +412,10 @@ def run_filter_post_processing_18(
     for k in ("prefit_resids_final", "postfit_resids_linear_final", "postfit_resids_meas"):
         if d.get(k, None) is not None:
             d[k] = np.asarray(d[k], dtype=float) * scale
+
+    # measurement covariance (rho, rhodot) scales with length^2
+    if d.get("R", None) is not None:
+        d["R"] = np.asarray(d["R"], dtype=float) * (scale ** 2)
 
     # P_pf is flattened covariance; scale if present
     if d.get("P_pf", None) is not None:

@@ -82,6 +82,17 @@ class KalmanFilterBase:
         r = np.vstack(self.hist["postfit"]) if len(self.hist["postfit"]) else np.empty((0, 0))
         rms_post_all = self.rms_nan(r[keep_all, :], axis=0) if r.size else None
         rms_post_ign = self.rms_nan(r[keep_ignore_first, :], axis=0) if r.size else None
+        rms_post_norm_all = None
+        rms_post_norm_ign = None
+
+        if r.size and self.R is not None:
+            Rinv = np.linalg.inv(self.R)
+            r_all = r[keep_all, :]
+            r_ign = r[keep_ignore_first, :]
+            norm_all = np.einsum("ij,jk,ik->i", r_all, Rinv, r_all)
+            norm_ign = np.einsum("ij,jk,ik->i", r_ign, Rinv, r_ign)
+            rms_post_norm_all = float(np.sqrt(np.nanmean(norm_all)))
+            rms_post_norm_ign = float(np.sqrt(np.nanmean(norm_ign)))
 
         state_comp_all = state_comp_ign = None
         pos3_all = pos3_ign = None
@@ -110,6 +121,8 @@ class KalmanFilterBase:
             "vel3_ignore_first": vel3_ign,
             "postfit_all": rms_post_all,
             "postfit_ignore_first": rms_post_ign,
+            "postfit_norm_all": rms_post_norm_all,
+            "postfit_norm_ignore_first": rms_post_norm_ign,
         }
 
     def print_rms_summary(self, label="", first_pass_gap_s=6 * 3600.0):
@@ -129,17 +142,31 @@ class KalmanFilterBase:
             print("State error RMS: (truth not logged)")
 
         if rms["postfit_all"] is not None:
-            print("Postfit residual RMS [all]:")
-            print(rms["postfit_all"])
-            print("Postfit residual RMS [ignore first]:")
-            print(rms["postfit_ignore_first"])
+            if rms.get("postfit_norm_all") is not None:
+                print(
+                    "Postfit residual RMS [all]: "
+                    f"RMS rho = {rms['postfit_all'][0]:.6g} | "
+                    f"RMS rhodot = {rms['postfit_all'][1]:.6g} | "
+                    f"RMS norm = {rms['postfit_norm_all']:.6g}"
+                )
+                print(
+                    "Postfit residual RMS [ignore first]: "
+                    f"RMS rho = {rms['postfit_ignore_first'][0]:.6g} | "
+                    f"RMS rhodot = {rms['postfit_ignore_first'][1]:.6g} | "
+                    f"RMS norm = {rms['postfit_norm_ignore_first']:.6g}"
+                )
+            else:
+                print("Postfit residual RMS [all]:")
+                print(rms["postfit_all"])
+                print("Postfit residual RMS [ignore first]:")
+                print(rms["postfit_ignore_first"])
         else:
             print("Postfit residual RMS: (no residuals logged)")
 
         return rms
 
     @staticmethod
-    def compute_rms_summary_from_arrays(t, postfit, state_err=None, first_pass_gap_s=6 * 3600.0):
+    def compute_rms_summary_from_arrays(t, postfit, state_err=None, first_pass_gap_s=6 * 3600.0, R=None):
         t = np.asarray(t, dtype=float).reshape(-1)
 
         if t.size < 2:
@@ -160,6 +187,17 @@ class KalmanFilterBase:
         postfit = np.asarray(postfit, dtype=float)
         rms_post_all = rms_nan(postfit[keep_all, :], axis=0) if postfit.size else None
         rms_post_ign = rms_nan(postfit[keep_ignore_first, :], axis=0) if postfit.size else None
+        rms_post_norm_all = None
+        rms_post_norm_ign = None
+
+        if postfit.size and R is not None:
+            Rinv = np.linalg.inv(np.asarray(R, dtype=float))
+            pf_all = postfit[keep_all, :]
+            pf_ign = postfit[keep_ignore_first, :]
+            norm_all = np.einsum("ij,jk,ik->i", pf_all, Rinv, pf_all)
+            norm_ign = np.einsum("ij,jk,ik->i", pf_ign, Rinv, pf_ign)
+            rms_post_norm_all = float(np.sqrt(np.nanmean(norm_all)))
+            rms_post_norm_ign = float(np.sqrt(np.nanmean(norm_ign)))
 
         state_comp_all = state_comp_ign = None
         pos3_all = pos3_ign = None
@@ -188,6 +226,8 @@ class KalmanFilterBase:
             "vel3_ignore_first": vel3_ign,
             "postfit_all": rms_post_all,
             "postfit_ignore_first": rms_post_ign,
+            "postfit_norm_all": rms_post_norm_all,
+            "postfit_norm_ignore_first": rms_post_norm_ign,
         }
 
     def reset_history(self):
@@ -454,6 +494,7 @@ class LinearizedKalmanFilter18State(KalmanFilterBase):
             "state_error_meas": state_error,
             "rms_final": rms_final,
             "rms_by_iter": None,
+            "R": self.R,
         }
 
 
@@ -718,6 +759,7 @@ class ExtendedKalmanFilter18State(KalmanFilterBase):
             "two_sigma_meas": two_sigma,
             "rms_final": rms_final,
             "rms_by_iter": None,
+            "R": self.R,
         }
 
     def run_warmstarted(
@@ -834,6 +876,7 @@ class ExtendedKalmanFilter18State(KalmanFilterBase):
             postfit=postfit_nl_comb,
             state_err=err_comb,
             first_pass_gap_s=self.first_pass_gap_s,
+            R=self.R,
         )
 
         return {
@@ -853,4 +896,5 @@ class ExtendedKalmanFilter18State(KalmanFilterBase):
             "P_pf": P_pf_comb,
             "rms_final": rms_combined,
             "rms_by_iter": None,
+            "R": self.R,
         }

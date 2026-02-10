@@ -95,6 +95,7 @@ def batch_estimate_x0(
 
         rms_acum_range = 0.0
         rms_acum_rr = 0.0
+        rms_acum_norm = 0.0
 
         for j, m in enumerate(all_meas):
             ti = float(m["t"])
@@ -177,6 +178,7 @@ def batch_estimate_x0(
 
             rms_acum_range += resid[0] ** 2
             rms_acum_rr += resid[1] ** 2
+            rms_acum_norm += resid.T @ Rinv @ resid
 
         # Save normal matrix for this iteration (for covariance history)
         Lambda_hist.append(Lambda.copy())
@@ -201,8 +203,12 @@ def batch_estimate_x0(
         dx_norm = np.linalg.norm(dx0)
         rms_range = np.sqrt(rms_acum_range / max(1, mcount))
         rms_rr = np.sqrt(rms_acum_rr / max(1, mcount))
+        rms_norm = np.sqrt(rms_acum_norm / max(1, mcount))
 
-        print(f"Batch Iter {it+1}: |dx| = {dx_norm:.6e} | RMS rho = {rms_range:.4f} m | RMS rhodot = {rms_rr:.5f} m/s")
+        print(
+            f"Batch Iter {it+1}: RMS rho = {rms_range:.4f} m | "
+            f"RMS rhodot = {rms_rr:.5f} m/s | RMS norm = {rms_norm:.4f}"
+        )
 
         if dx_norm < tol:
             print("Batch converged.")

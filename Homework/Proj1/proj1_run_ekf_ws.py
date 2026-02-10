@@ -96,12 +96,30 @@ R = np.diag([sigma_rho_m**2, sigma_rhod_m_s**2])
 # -----------------------------
 # A priori covariance
 # -----------------------------
-P0_diag = (
-    [1e6] * 6 +          # r,v
-    [1e20, 1e6, 1e6] +    # mu, J2, Cd
-    [1e-10] * 3 +         # station 101
-    [1e6] * 6             # stations 337, 394
-)
+P0_diag = [
+    1e6,   # 1  r_x
+    1e6,   # 2  r_y
+    1e6,   # 3  r_z
+    1e6,   # 4  v_x
+    1e6,   # 5  v_y
+    1e6,   # 6  v_z
+
+    1e20,  # 7  mu
+    1e6,   # 8  J2
+    1e6,   # 9  Cd
+
+    1e-10, # 10 station 101 x
+    1e-10, # 11 station 101 y
+    1e-10, # 12 station 101 z
+
+    1e6,   # 13 station 337 x
+    1e6,   # 14 station 337 y
+    1e6,   # 15 station 337 z
+
+    1e6,   # 16 station 394 x
+    1e6,   # 17 station 394 y
+    1e6    # 18 station 394 z
+]
 P0 = np.diag(P0_diag)
 
 # -----------------------------
@@ -144,7 +162,7 @@ out = ekf.run_warmstarted(
     all_meas=all_meas,
     stations=[],
     lkf=lkf,
-    num_init_meas=50,
+    num_init_meas = 50,
     Xtrue_meas=None,
 )
 

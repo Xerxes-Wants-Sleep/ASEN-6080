@@ -88,13 +88,13 @@ J2_0 = 1.082626925638815e-3
 Cd0 = 2
 
 x0_bar = np.hstack([r0, v0, mu0, J2_0, Cd0, Rs_101, Rs_337, Rs_394])
-
+print(x0_bar)
 # -----------------------------
 # Measurement noise
 # TODO: update these sigmas if different
 # -----------------------------
-sigma_rho_m = 0.01      # 1 cm
-sigma_rhod_m_s = 0.001  # 1 mm/s
+sigma_rho_m = 1e9      # 1 cm
+sigma_rhod_m_s = .001  # 1 mm/s
 R = np.diag([sigma_rho_m**2, sigma_rhod_m_s**2])
 
 # -----------------------------
@@ -174,7 +174,7 @@ print_rms_summary(result, ignore_first_pass=True)
 # Make plots
 # -----------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-PLOT_DIR = SCRIPT_DIR / "Plots" / "Station_18"
+PLOT_DIR = SCRIPT_DIR / "Plots" / "Station_No_Range"
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 make_prefit_residuals_plot(result, PLOT_DIR)
