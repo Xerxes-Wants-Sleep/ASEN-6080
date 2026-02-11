@@ -44,12 +44,12 @@ all_meas = [
 ]
 
 # -----------------------------
-# Station mapping (state order: Rs_101, Rs_337, Rs_394)
+# Station mapping 
 # -----------------------------
 station_state_map = {101: 0, 337: 1, 394: 2}
 
 # -----------------------------
-# Constants for dynamics (Project 1 handout)
+# Constants for dynamics
 # -----------------------------
 Re = 6378136.3  # meters
 omega_vec = np.array([0.0, 0.0, 7.2921158553e-5], dtype=float)
@@ -91,7 +91,6 @@ x0_bar = np.hstack([r0, v0, mu0, J2_0, Cd0, Rs_101, Rs_337, Rs_394])
 print(x0_bar)
 # -----------------------------
 # Measurement noise
-# TODO: update these sigmas if different
 # -----------------------------
 sigma_rho_m = .01      # 1 cm
 sigma_rhod_m_s = .001  # 1 mm/s
@@ -200,7 +199,7 @@ plot_cov_ellipsoid(result, PLOT_DIR)
 
 # -----------------------------
 # State error (18-state) vs a priori flow
-#   Δx = φ(t, x0_apriori, t0) - X_hat(t)
+#   Delta x = Phi(t, x0_apriori, t0) - X_hat(t)
 # -----------------------------
 dx_hist_time = info.get("dx_hist_time", None)
 if dx_hist_time is not None:

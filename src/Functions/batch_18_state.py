@@ -89,7 +89,6 @@ def batch_estimate_x0(
             settings=prop_settings
         )
 
-        # residual storage for this iteration (mostly for debugging)
         OminusC = np.full((mcount, 2), np.nan, dtype=float)
         H_store = np.full((mcount, 2, n), np.nan, dtype=float)
 

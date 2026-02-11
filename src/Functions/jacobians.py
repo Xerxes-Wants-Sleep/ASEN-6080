@@ -213,7 +213,7 @@ def orbit_propagator_aug9(t, X9, Re=6378, j2=True, j3=True):
     return np.hstack((v, a, 0.0, 0.0, 0.0))
 
 
-def stm(t, state9: np.ndarray, phi: np.ndarray, rows_col_to_remove: np.ndarray, Re=6378, j2=True, j3=True):  #are you proud of me dad?
+def stm(t, state9: np.ndarray, phi: np.ndarray, rows_col_to_remove: np.ndarray, Re=6378, j2=True, j3=True):
 
     '''Removed the rows and columns as needed
        Flatten remaing matrSTMix into a colums for propagation

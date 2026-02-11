@@ -852,7 +852,6 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         )
 
         return {
-            # debug / optional
             "lkf_init": lkf_out,
             "ekf": ekf_out,
             "t_start_ekf": t_start,

@@ -46,7 +46,7 @@ all_meas = [
 station_state_map = {101: 0, 337: 1, 394: 2}
 
 # -----------------------------
-# Constants for dynamics (Project 1 handout)
+# Constants for dynamics
 # -----------------------------
 Re = 6378136.3  # meters
 omega_vec = np.array([0.0, 0.0, 7.2921158553e-5], dtype=float)
