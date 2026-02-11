@@ -93,7 +93,7 @@ print(x0_bar)
 # Measurement noise
 # TODO: update these sigmas if different
 # -----------------------------
-sigma_rho_m = 1e9      # 1 cm
+sigma_rho_m = .01      # 1 cm
 sigma_rhod_m_s = .001  # 1 mm/s
 R = np.diag([sigma_rho_m**2, sigma_rhod_m_s**2])
 
@@ -116,8 +116,8 @@ P0_diag = [
     1e-10, # 11 station 101 y
     1e-10, # 12 station 101 z
 
-    1e6,   # 13 station 337 x
-    1e6,   # 14 station 337 y
+    1e6,   # 13 station 394 x
+    1e6,   # 14 station 394 y
     1e6,   # 15 station 337 z
 
     1e6,   # 16 station 394 x
@@ -153,6 +153,20 @@ print("x0_hat (first 6):", x0_hat[:6])
 print("diag(P0_hat) (first 6):", np.diag(P0_hat)[:6])
 
 # -----------------------------
+# Formal 1-sigma at reference epoch (from P0_hat)
+# -----------------------------
+sig_pos = np.sqrt(np.diag(P0_hat)[0:3])
+sig_vel = np.sqrt(np.diag(P0_hat)[3:6])
+print("Final 1-sigma at t0 (from P0_hat):")
+print(f"  sigma_x = {sig_pos[0]:.6g} m, sigma_y = {sig_pos[1]:.6g} m, sigma_z = {sig_pos[2]:.6g} m")
+print(f"  sigma_vx = {sig_vel[0]:.6g} m/s, sigma_vy = {sig_vel[1]:.6g} m/s, sigma_vz = {sig_vel[2]:.6g} m/s")
+print(
+    "SIGMA_ROW, "
+    f"{sig_pos[0]:.6g}, {sig_pos[1]:.6g}, {sig_pos[2]:.6g}, "
+    f"{sig_vel[0]:.6g}, {sig_vel[1]:.6g}, {sig_vel[2]:.6g}"
+)
+
+# -----------------------------
 # Post-process + RMS prints
 # -----------------------------
 result = run_batch_post_processing_18(
@@ -168,20 +182,19 @@ result = run_batch_post_processing_18(
 )
 
 print_rms_summary(result, ignore_first_pass=False)
-print_rms_summary(result, ignore_first_pass=True)
 
 # -----------------------------
 # Make plots
 # -----------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-PLOT_DIR = SCRIPT_DIR / "Plots" / "Station_No_Range"
+PLOT_DIR = SCRIPT_DIR / "Plots" / "Brun7"
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 make_prefit_residuals_plot(result, PLOT_DIR)
 make_postfit_residuals_linear_plot(result, PLOT_DIR)
-make_postfit_residuals_nonlinear_plot(result, PLOT_DIR)
-make_cov_diag_log_plot(result, PLOT_DIR)
-make_trace_cov_plot(result, PLOT_DIR)
+# make_postfit_residuals_nonlinear_plot(result, PLOT_DIR)
+# make_cov_diag_log_plot(result, PLOT_DIR)
+# make_trace_cov_plot(result, PLOT_DIR)
 make_trace_cov_pos_vel_plot(result, PLOT_DIR, length_unit="m")
 plot_cov_ellipsoid(result, PLOT_DIR)
 
