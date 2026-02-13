@@ -1,6 +1,6 @@
 import numpy as np
 
-from .jacobians import (
+from src.Functions.jacobians import (
     accel_wJ2J3,
     dadr_wJ2J3,
     da_dparams_wJ2J3,

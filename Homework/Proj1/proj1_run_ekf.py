@@ -2,13 +2,18 @@ import numpy as np
 import sys
 
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.append(str(SCRIPT_DIR / "Functions"))
+sys.path.append(str(SCRIPT_DIR / "plotting"))
 sys.path.append("../../")
 
-from src.Functions.filter_18_state import ExtendedKalmanFilter18State
-from src.Functions.dynamics_muJ2_drag import f_muJ2_drag, A_muJ2_drag
+from filter_18_state import ExtendedKalmanFilter18State
+from dynamics_muJ2_drag import f_muJ2_drag, A_muJ2_drag
 from src.Functions.propagation import PropSettings, propagate_x_phi_history
 
-from src.helpers.plotting.post_processing import run_filter_post_processing_18, print_rms_summary
+from post_processing_18 import run_filter_post_processing_18
+from src.helpers.plotting.post_processing import print_rms_summary
 from src.helpers.plotting.plot_prefit_residuals import make_prefit_residuals_plot
 from src.helpers.plotting.plot_postfit_residuals_linear import make_postfit_residuals_linear_plot
 from src.helpers.plotting.plot_postfit_residuals_nonlinear import make_postfit_residuals_nonlinear_plot
@@ -16,13 +21,13 @@ from src.helpers.plotting.plot_cov_diag_log import make_cov_diag_log_plot
 from src.helpers.plotting.plot_trace_cov import make_trace_cov_plot
 from src.helpers.plotting.plot_trace_cov_pos_vel import make_trace_cov_pos_vel_plot
 from src.helpers.plotting.plot_cov_ellipsoid import plot_cov_ellipsoid
-from src.helpers.plotting.plot_state_errors_18 import make_state_errors_18_plot
+from plot_state_errors_18 import make_state_errors_18_plot
 
 
 # -----------------------------
 # Load measurements
 # -----------------------------
-meas_path = Path(__file__).resolve().parent / "Given_Data" / "project.txt"
+meas_path = SCRIPT_DIR / "Given_Data" / "project.txt"
 data = np.loadtxt(meas_path)
 
 t_meas = data[:, 0]
