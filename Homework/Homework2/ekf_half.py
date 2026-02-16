@@ -8,6 +8,7 @@ sys.path.append("../../")
 
 from src.Functions.stations import Stations
 from src.Functions.filters import ExtendedKalmanFilter   # <-- change if your module name differs
+from src.Functions.range_rangerate import H_range_rangerate
 
 
 # -----------------------------
@@ -39,10 +40,32 @@ print(f"Using {len(all_meas)} / {len(all_meas_full)} measurements")
 # 2) Stations (same as HW1 / batch)
 # -----------------------------
 stations = [
-    Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944),
-    Stations("Station 2", lat_deg=40.427222,  lon_deg=355.749444),
-    Stations("Station 3", lat_deg=35.247164,  lon_deg=243.205000),
+    Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944, theta0_deg=0.0, radius_earth=6378.0, w_earth_rad_per_s=7.2921158553e-5),
+    Stations("Station 2", lat_deg=40.427222, lon_deg=355.749444, theta0_deg=0.0, radius_earth=6378.0, w_earth_rad_per_s=7.2921158553e-5),
+    Stations("Station 3", lat_deg=35.247164, lon_deg=243.205000, theta0_deg=0.0, radius_earth=6378.0, w_earth_rad_per_s=7.2921158553e-5),
 ]
+
+# ---- measurement callbacks (filter-agnostic) ----
+station_map = {st.name: st for st in stations}
+
+def get_measurement(m):
+    return np.array([m["rho_km"], m["rho_dot_km_s"]], dtype=float)
+
+def predict_obs(x, m):
+    st = station_map[m["station"]]
+    d = st.measure(x[0:3], x[3:6], float(m["t"]))
+    if d is None:
+        return None
+    return np.array([d["rho"], d["rho_dot"]], dtype=float)
+
+def H_matrix(x, m):
+    st = station_map[m["station"]]
+    Rs, Vs, _ = st.ecef2eci(float(m["t"]), st.r_ecef, np.zeros(3))
+    H_sc = H_range_rangerate(x[0:3], x[3:6], Rs, Vs)
+    H = np.zeros((2, x.size), dtype=float)
+    H[:, 0:3] = H_sc[:, 0:3]
+    H[:, 3:6] = H_sc[:, 3:6]
+    return H
 
 
 # -----------------------------
@@ -122,9 +145,16 @@ ekf = ExtendedKalmanFilter(
     j2=True,
     j3=False,
     first_pass_gap_s=6*3600.0,
+    state_mapping_dict={"pos_idx": [0, 1, 2], "vel_idx": [3, 4, 5]},
 )
 
-out = ekf.run(all_meas=all_meas, stations=stations, Xtrue_meas=Xtrue_meas)
+out = ekf.run(
+    all_meas=all_meas,
+    get_measurement=get_measurement,
+    predict_obs=predict_obs,
+    H_matrix=H_matrix,
+    Xtrue_meas=Xtrue_meas,
+)
 
 print("\n=== EKF finished (F) ===")
 print("Xhat_meas shape:", out["Xhat_meas"].shape)
@@ -247,3 +277,4 @@ else:
 
 
 plt.show()
+

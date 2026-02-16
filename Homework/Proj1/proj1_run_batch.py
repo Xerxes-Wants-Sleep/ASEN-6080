@@ -3,18 +3,13 @@ import sys
 from dataclasses import replace
 
 from pathlib import Path
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-sys.path.append(str(SCRIPT_DIR / "Functions"))
-sys.path.append(str(SCRIPT_DIR / "plotting"))
 sys.path.append("../../")
 
-from batch_18_state import batch_estimate_x0
-from dynamics_muJ2_drag import f_muJ2_drag, A_muJ2_drag
+from src.Functions.batch_18_state import batch_estimate_x0
+from src.Functions.dynamics_muJ2_drag import f_muJ2_drag, A_muJ2_drag
 from src.Functions.propagation import PropSettings, propagate_x_phi_history
 
-from post_processing_18 import run_batch_post_processing_18
-from src.helpers.plotting.post_processing import print_rms_summary
+from src.helpers.plotting.post_processing import run_batch_post_processing_18, print_rms_summary
 from src.helpers.plotting.plot_prefit_residuals import make_prefit_residuals_plot
 from src.helpers.plotting.plot_postfit_residuals_linear import make_postfit_residuals_linear_plot
 from src.helpers.plotting.plot_postfit_residuals_nonlinear import make_postfit_residuals_nonlinear_plot
@@ -24,13 +19,13 @@ from src.helpers.plotting.plot_state_errors_eci import make_state_errors_eci_plo
 from src.helpers.plotting.plot_state_errors_rsw import make_state_errors_rsw_plot
 from src.helpers.plotting.plot_trace_cov_pos_vel import make_trace_cov_pos_vel_plot
 from src.helpers.plotting.plot_cov_ellipsoid import plot_cov_ellipsoid
-from plot_state_errors_18 import make_state_errors_18_plot
+from src.helpers.plotting.plot_state_errors_18 import make_state_errors_18_plot
 
 
 # -----------------------------
 # Load measurements
 # -----------------------------
-meas_path = SCRIPT_DIR / "Given_Data" / "project.txt"
+meas_path = Path(__file__).resolve().parent / "Given_Data" / "project.txt"
 data = np.loadtxt(meas_path)
 
 t_meas = data[:, 0]
@@ -49,7 +44,7 @@ all_meas = [
 ]
 
 # -----------------------------
-# Station mapping 
+# Station mapping
 # -----------------------------
 station_state_map = {101: 0, 337: 1, 394: 2}
 
@@ -77,14 +72,14 @@ dyn_jac = lambda t, x: A_muJ2_drag(t, x, const)
 prop_settings = PropSettings(rtol=1e-10, atol=1e-10, method="DOP853")
 
 # -----------------------------
-# Station initial positions (ECEF at t0, used as ECI at t0)
+# Station initial positions
 # -----------------------------
 Rs_101 = np.array([-5127510.0, -3794160.0, 0.0], dtype=float)
 Rs_337 = np.array([3860910.0, 3238490.0, 3898094.0], dtype=float)
 Rs_394 = np.array([549505.0, -1380872.0, 6182197.0], dtype=float)
 
 # -----------------------------
-# Initial guess 
+# Initial guess
 # -----------------------------
 r0 = np.array([757700.0, 5222607.0, 4851500.0], dtype=float)
 v0 = np.array([2213.21, 4678.34, -5371.30], dtype=float)
@@ -102,19 +97,19 @@ sigma_rhod_m_s = .001  # 1 mm/s
 R = np.diag([sigma_rho_m**2, sigma_rhod_m_s**2])
 
 # -----------------------------
-# A priori covariance 
+# A priori covariance
 # -----------------------------
 P0_diag = [
-    1e6,   # 1  r_x
-    1e6,   # 2  r_y
-    1e6,   # 3  r_z
-    1e6,   # 4  v_x
-    1e6,   # 5  v_y
-    1e6,   # 6  v_z
+    1e6,   # 1 r_x
+    1e6,   # 2 r_y
+    1e6,   # 3 r_z
+    1e6,   # 4 v_x
+    1e6,   # 5 v_y
+    1e6,   # 6 v_z
 
-    1e20,  # 7  mu
-    1e6,   # 8  J2
-    1e6,   # 9  Cd
+    1e20,  # 7 mu
+    1e6,   # 8 J2
+    1e6,   # 9 Cd
 
     1e-10, # 10 station 101 x
     1e-10, # 11 station 101 y
@@ -132,7 +127,7 @@ P0_diag = [
 P0 = np.diag(P0_diag)
 
 # -----------------------------
-# Run batch (18-state)
+# Run batch
 # -----------------------------
 x0_hat, P0_hat, info = batch_estimate_x0(
     all_meas=all_meas,
@@ -157,7 +152,7 @@ print("x0_hat (first 6):", x0_hat[:6])
 print("diag(P0_hat) (first 6):", np.diag(P0_hat)[:6])
 
 # -----------------------------
-# Formal 1-sigma at reference epoch (from P0_hat)
+# Formal 1-sigma at reference epoch
 # -----------------------------
 sig_pos = np.sqrt(np.diag(P0_hat)[0:3])
 sig_vel = np.sqrt(np.diag(P0_hat)[3:6])
@@ -196,15 +191,14 @@ PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 make_prefit_residuals_plot(result, PLOT_DIR)
 make_postfit_residuals_linear_plot(result, PLOT_DIR)
-# make_postfit_residuals_nonlinear_plot(result, PLOT_DIR)
-# make_cov_diag_log_plot(result, PLOT_DIR)
-# make_trace_cov_plot(result, PLOT_DIR)
+# make_postfit_residuals_nonlinear_plot
+# make_cov_diag_log_plot
 make_trace_cov_pos_vel_plot(result, PLOT_DIR, length_unit="m")
 plot_cov_ellipsoid(result, PLOT_DIR)
 
 # -----------------------------
-# State error (18-state) vs a priori flow
-#   Delta x = Phi(t, x0_apriori, t0) - X_hat(t)
+# State error vs a priori flow
+# Δx = φ - X_hat
 # -----------------------------
 dx_hist_time = info.get("dx_hist_time", None)
 if dx_hist_time is not None:
@@ -217,7 +211,7 @@ if dx_hist_time is not None:
     )
 
 # -----------------------------
-# Per-iteration plots (iterations 1-3)
+# Per-iteration plots
 # -----------------------------
 prefit_hist = info.get("prefit_resids_hist", [])
 postfit_lin_hist = info.get("postfit_resids_linear_hist", [])
@@ -226,7 +220,7 @@ x0_star_hist = info.get("x0_star_hist", [])
 
 max_iters_to_plot = min(3, len(prefit_hist), len(postfit_lin_hist), len(Lambda_hist))
 
-# Baseline (a-priori flow) for per-iteration state error plots
+# Baseline for per-iteration state error plots
 X_base_iter, _ = propagate_x_phi_history(
     x0=x0_bar,
     t_eval=t_meas,

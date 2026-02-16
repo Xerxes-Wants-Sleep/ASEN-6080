@@ -7,6 +7,7 @@ sys.path.append("../../")
 
 from src.Functions.stations import Stations
 from src.Functions.filters import ExtendedKalmanFilter
+from src.Functions.range_rangerate import H_range_rangerate
 from src.helpers.plotting.post_processing import run_filter_post_processing, print_rms_summary
 
 from src.helpers.plotting.plot_prefit_residuals import make_prefit_residuals_plot
@@ -24,10 +25,32 @@ all_meas = df.to_dict(orient="records")
 
 # ---- stations ----
 stations = [
-    Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944),
-    Stations("Station 2", lat_deg=40.427222, lon_deg=355.749444),
-    Stations("Station 3", lat_deg=35.247164, lon_deg=243.205000),
+    Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944, theta0_deg=122, radius_earth=6378.0, w_earth_rad_per_s=2*np.pi/86400),
+    Stations("Station 2", lat_deg=40.427222, lon_deg=355.749444, theta0_deg=122, radius_earth=6378.0, w_earth_rad_per_s=2*np.pi/86400),
+    Stations("Station 3", lat_deg=35.247164, lon_deg=243.205000, theta0_deg=122, radius_earth=6378.0, w_earth_rad_per_s=2*np.pi/86400),
 ]
+
+# ---- measurement callbacks (filter-agnostic) ----
+station_map = {st.name: st for st in stations}
+
+def get_measurement(m):
+    return np.array([m["rho_km"], m["rho_dot_km_s"]], dtype=float)
+
+def predict_obs(x, m):
+    st = station_map[m["station"]]
+    d = st.measure(x[0:3], x[3:6], float(m["t"]))
+    if d is None:
+        return None
+    return np.array([d["rho"], d["rho_dot"]], dtype=float)
+
+def H_matrix(x, m):
+    st = station_map[m["station"]]
+    Rs, Vs, _ = st.ecef2eci(float(m["t"]), st.r_ecef, np.zeros(3))
+    H_sc = H_range_rangerate(x[0:3], x[3:6], Rs, Vs)
+    H = np.zeros((2, x.size), dtype=float)
+    H[:, 0:3] = H_sc[:, 0:3]
+    H[:, 3:6] = H_sc[:, 3:6]
+    return H
 
 # ---- noise ----
 sigma_rho_km = 1e-3
@@ -71,9 +94,16 @@ ekf = ExtendedKalmanFilter(
     j2=True,
     j3=False,
     first_pass_gap_s=6*3600.0,
+    state_mapping_dict={"pos_idx": [0, 1, 2], "vel_idx": [3, 4, 5]},
 )
 
-out = ekf.run(all_meas=all_meas, stations=stations, Xtrue_meas=Xtrue_meas)
+out = ekf.run(
+    all_meas=all_meas,
+    get_measurement=get_measurement,
+    predict_obs=predict_obs,
+    H_matrix=H_matrix,
+    Xtrue_meas=Xtrue_meas,
+)
 
 # Convert to BatchPostProcessResult so all batch plotters work
 result = run_filter_post_processing(out=out)
@@ -93,3 +123,4 @@ make_cov_diag_log_plot(result, PLOT_DIR)
 make_trace_cov_plot(result, PLOT_DIR)
 
 print(f"\nSaved EKF plots to: {PLOT_DIR.resolve()}")
+

@@ -35,9 +35,9 @@ print(f"Using {len(all_meas)} / {len(all_meas_full)} measurements")
 # 2) Stations (same as HW1)
 # -----------------------------
 stations = [
-    Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944),
-    Stations("Station 2", lat_deg=40.427222,  lon_deg=355.749444),
-    Stations("Station 3", lat_deg=35.247164,  lon_deg=243.205000),
+    Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944, theta0_deg=0.0, radius_earth=6378.0, w_earth_rad_per_s=7.2921158553e-5),
+    Stations("Station 2", lat_deg=40.427222, lon_deg=355.749444, theta0_deg=0.0, radius_earth=6378.0, w_earth_rad_per_s=7.2921158553e-5),
+    Stations("Station 3", lat_deg=35.247164, lon_deg=243.205000, theta0_deg=0.0, radius_earth=6378.0, w_earth_rad_per_s=7.2921158553e-5),
 ]
 
 # 3) Define measurement noise R (ORIGINAL noise)
@@ -271,3 +271,4 @@ else:
         ax.legend(ncol=3)
         plt.tight_layout()
         save_fig(fig, "batch_state_component_rms_vs_iteration_first_half.png")
+
