@@ -5,6 +5,7 @@ from scipy.integrate import solve_ivp
 
 from .jacobians import stm
 from .propagation import PropSettings, propagate_x_phi_history, propagate_x_phi_step
+from .snc import state_noise_compensation
 
 
 class KalmanFilterBase:
@@ -23,16 +24,17 @@ class KalmanFilterBase:
         self.P0 = np.array(P0, dtype=float).copy()
 
         self.n = int(self.Xhat.size)
-        if self.Phat.shape != (self.n, self.n):
-            raise ValueError(f"P0 must be ({self.n},{self.n}); got {self.Phat.shape}")
-        if self.Q.shape != (self.n, self.n):
-            raise ValueError(f"Q must be ({self.n},{self.n}); got {self.Q.shape}")
+
 
         self.state_mapping_dict = {} if state_mapping_dict is None else dict(state_mapping_dict)
         self.pos_idx = self._parse_index_list(self.state_mapping_dict.get("pos_idx"), "pos_idx", required_len=3)
         self.vel_idx = self._parse_index_list(self.state_mapping_dict.get("vel_idx"), "vel_idx", required_len=3)
 
         self.hist = {"t": [], "state_err": [], "postfit": []}
+
+    def _snc_covariance(self, dt: float) -> np.ndarray:
+        dt = float(dt)
+        return state_noise_compensation(dt, self.n, int(self.Q.shape[0]), self.Q)
 
     def _parse_index_list(self, idx, name: str, required_len: int | None = None):
         if idx is None:
@@ -398,7 +400,12 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             Phi = Phi_step[j, :, :]
 
             xbar = Phi @ x_hat
-            Pbar = Phi @ P @ Phi.T + self.Q
+
+
+            #ADdding State Noise cov stuff
+            dt = 0.0 if j == 0 else float(t_meas[j] - t_meas[j - 1])
+            snc_eci = self._snc_covariance(dt)
+            Pbar = Phi @ P @ Phi.T + snc_eci
 
             C = predict_obs(Xstar, meas_rec) if have_meas else None
 
@@ -651,7 +658,9 @@ class ExtendedKalmanFilter(KalmanFilterBase):
             have_meas = (meas is not None) and np.isfinite(meas).all()
 
             Xbar, Phi = self._propagate_state_and_stm_step(prev_time, t, X_hat)
-            Pbar = Phi @ P @ Phi.T + self.Q
+            dt = float(t - prev_time)
+            snc_eci = self._snc_covariance(dt)
+            Pbar = Phi @ P @ Phi.T + snc_eci
 
             C = predict_obs(Xbar, meas_rec) if have_meas else None
 
