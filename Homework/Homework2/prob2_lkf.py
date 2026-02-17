@@ -12,19 +12,19 @@ from src.Functions.filters import LinearizedKalmanFilter   # <-- change if your 
 
 
 # -----------------------------
-# 1) Read measurements (noisy)  (SAME AS BATCH)
+# 1) Read measurements (noisy)
 # -----------------------------
 meas_path = "meas_data/prob2_hw2_measurements_noisy.csv"
 df = pd.read_csv(meas_path)
 
-# Convert to list-of-dicts like your batch expects
+
 all_meas = df.to_dict(orient="records")
 all_meas = sorted(all_meas, key=lambda m: float(m["t"]))
 
 t_meas = np.array([float(m["t"]) for m in all_meas], dtype=float)
 
 # -----------------------------
-# 2) Stations (same as HW1 / batch)
+# 2) Stations
 # -----------------------------
 stations = [
     Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944),
@@ -43,7 +43,7 @@ R = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
 
 
 
-PLOTS_DIR = Path("Plots") / "LKF 2B"     # <- subfolder for LKF figures
+PLOTS_DIR = Path("Plots") / "LKF 2B"   
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------

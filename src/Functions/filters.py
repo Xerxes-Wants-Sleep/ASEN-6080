@@ -2,6 +2,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from .jacobians import stm
 from .range_rangerate import H_range_rangerate
+from .snc import state_noise_compensation, eci_to_ric_rotation
  
 
 
@@ -13,7 +14,15 @@ class KalmanFilterBase:
         self.Xhat = np.array(x0, dtype=float).copy()     # (6,)
         self.Phat = np.array(P0, dtype=float).copy()     # (6,6)
         self.R = np.array(R, dtype=float).copy()         # (2,2)
-        self.Q = np.array(Q, dtype=float).copy()         # (6,6) discrete
+        self.Q = np.array(Q, dtype=float).copy()         # (3,3) continuous accel or (6,6) discrete
+        if self.Q.shape not in {(3, 3), (6, 6)}:
+            raise ValueError(
+                f"Q must be shape (3,3) for SNC accel covariance or (6,6) for fixed discrete noise; got {self.Q.shape}"
+            )
+        # Process-noise frame for 3x3 acceleration covariance:
+        #   "eci" -> Q already in ECI
+        #   "ric" -> Q defined in RIC and rotated to ECI each step
+        self.q_frame = "eci"
         self.P0 = P0
 
         self.hist = {
@@ -21,6 +30,35 @@ class KalmanFilterBase:
             "state_err": [],   # Xhat - Xtrue (if provided)
             "postfit": [],     # Y - G(Xhat,t) (NaNs allowed)
         }
+
+    def build_process_noise(self, delta_t: float, r_eci: np.ndarray | None = None, v_eci: np.ndarray | None = None) -> np.ndarray:
+        """
+        Return discrete Q_k for the current propagation step.
+
+        - If self.Q is (3,3), treat it as continuous acceleration covariance and
+          build Q_k with state-noise compensation.
+        - If self.Q is (6,6), treat it as already-discrete fixed Q_k.
+        """
+        if self.Q.shape == (6, 6):
+            return self.Q
+
+        dt = max(float(delta_t), 0.0)
+        if dt == 0.0:
+            return np.zeros((6, 6), dtype=float)
+
+        q_frame = str(getattr(self, "q_frame", "eci")).strip().lower()
+        if q_frame == "eci":
+            Q_accel_eci = self.Q
+        elif q_frame == "ric":
+            if r_eci is None or v_eci is None:
+                raise ValueError("RIC process noise requested but r_eci/v_eci were not provided.")
+            C_eci_to_ric = eci_to_ric_rotation(r_eci=r_eci, v_eci=v_eci)
+            C_ric_to_eci = C_eci_to_ric.T
+            Q_accel_eci = C_ric_to_eci @ self.Q @ C_ric_to_eci.T
+        else:
+            raise ValueError(f"Unsupported q_frame '{self.q_frame}'. Use 'eci' or 'ric'.")
+
+        return state_noise_compensation(delta_t=dt, n=6, m=3, Q=Q_accel_eci)
 
     def log_epoch(self, t, postfit_resid, Xtrue=None):
         self.hist["t"].append(float(t))
@@ -287,7 +325,9 @@ class LinearizedKalmanFilter(KalmanFilterBase):
         d = station.measure(X6[:3], X6[3:], float(t))
         if d is None:
             return None
-        return np.array([d["rho_km"], d["rho_dot_km_s"]], dtype=float)
+        rho = d["rho_km"] if "rho_km" in d else d["rho"]
+        rhod = d["rho_dot_km_s"] if "rho_dot_km_s" in d else d["rho_dot"]
+        return np.array([rho, rhod], dtype=float)
 
     # ------------------------------------------------------------
     # RUN
@@ -347,8 +387,10 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             Phi = Phi_step[j, :, :]
 
             # ---- Time Update (error-state) ----
+            dt = 0.0 if j == 0 else (t - float(t_meas[j - 1]))
+            Qk = self.build_process_noise(dt, r_eci=Xstar[:3], v_eci=Xstar[3:6])
             xbar = Phi @ x_hat
-            Pbar = Phi @ P @ Phi.T + self.Q
+            Pbar = Phi @ P @ Phi.T + Qk
 
             # ---- Observation at reference ----
             C = self.G(st, Xstar, t)
@@ -517,7 +559,9 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         d = station.measure(X6[:3], X6[3:], float(t))
         if d is None:
             return None
-        return np.array([d["rho_km"], d["rho_dot_km_s"]], dtype=float)
+        rho = d["rho_km"] if "rho_km" in d else d["rho"]
+        rhod = d["rho_dot_km_s"] if "rho_dot_km_s" in d else d["rho_dot"]
+        return np.array([rho, rhod], dtype=float)
 
     def _propagate_state_and_stm_step(self, t0: float, t1: float, X0_6: np.ndarray):
         """
@@ -616,8 +660,10 @@ class ExtendedKalmanFilter(KalmanFilterBase):
             Y = np.array([all_meas[j]["rho_km"], all_meas[j]["rho_dot_km_s"]], dtype=float)
 
             # ---- Time Update (propagate state + STM) ----
+            dt = t - prev_time
             Xbar, Phi = self._propagate_state_and_stm_step(prev_time, t, X_hat)
-            Pbar = Phi @ P @ Phi.T + self.Q
+            Qk = self.build_process_noise(dt, r_eci=Xbar[:3], v_eci=Xbar[3:6])
+            Pbar = Phi @ P @ Phi.T + Qk
 
             # ---- Observation / prefit residual ----
             C = self.G(st, Xbar, t)

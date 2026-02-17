@@ -98,8 +98,11 @@ class Stations:
         return {
         "station": self.name,
         "t": t,
+        # Keep both key styles for compatibility across HW2/HW3 and project code.
         "rho": float(rho),
         "rho_dot": float(rho_dot),
+        "rho_km": float(rho),
+        "rho_dot_km_s": float(rho_dot),
         "elev_rad": elev
         }
 
