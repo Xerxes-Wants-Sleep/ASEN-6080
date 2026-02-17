@@ -10,6 +10,7 @@ import pandas as pd
 sys.path.append("../../")
 
 from src.Functions.dmc import ekf_with_dmc
+from src.Functions.jacobians import accel_wJ2J3
 from src.Functions.kep2cart import Keplarian_to_Cartesian
 from src.Functions.stations import Stations
 
@@ -65,19 +66,6 @@ def load_problem2_inputs(mu_km3_s2: float):
         Xtrue_meas = truth_aligned[["x_km", "y_km", "z_km", "vx_km_s", "vy_km_s", "vz_km_s"]].to_numpy(float)
     else:
         Xtrue_meas = np.column_stack([np.interp(t_meas, truth_times, truth_states[:, k]) for k in range(6)])
-
-    # Match HW2 problem setup.
-    r0_true, v0_true, _ = Keplarian_to_Cartesian(
-        mu_km3_s2,
-        10000.0,
-        0.001,
-        40.0,
-        80.0,
-        40.0,
-        0.0,
-    )
-    x0_true = np.hstack((r0_true, v0_true))
-
     stations = build_stations()
 
     sigma_rho_km = 1.0e-3
@@ -102,6 +90,8 @@ def load_problem2_inputs(mu_km3_s2: float):
     )
 
     dx = np.array([0.1, -0.03, 0.25, 0.3e-3, -0.5e-3, 0.2e-3], dtype=float)
+    x0_true = truth_states[0, :]
+
     x0_hat = x0_true + dx
 
     return all_meas, Xtrue_meas, stations, R, P0, x0_hat, x0_true
@@ -115,6 +105,50 @@ def initial_orbit_period_s(x0_6: np.ndarray, mu_km3_s2: float) -> float:
     eps = 0.5 * vmag * vmag - float(mu_km3_s2) / rmag
     a = -float(mu_km3_s2) / (2.0 * eps)
     return float(2.0 * np.pi * np.sqrt(a**3 / float(mu_km3_s2)))
+
+
+def compute_w_ref_from_truth(Xtrue_meas: np.ndarray, mu: float, J2: float, J3: float, Re: float = 6378.0) -> np.ndarray:
+    Xtrue_meas = np.asarray(Xtrue_meas, dtype=float)
+    w_ref = np.zeros((Xtrue_meas.shape[0], 3), dtype=float)
+    for k in range(Xtrue_meas.shape[0]):
+        r = Xtrue_meas[k, 0:3]
+        a_truth = accel_wJ2J3(r, mu, J2, J3, Re=Re, j2=True, j3=True)
+        a_filter = accel_wJ2J3(r, mu, J2, 0.0, Re=Re, j2=True, j3=False)
+        w_ref[k, :] = a_truth - a_filter
+    return w_ref
+
+
+def load_w_ref_from_csv(csv_path: Path, t_target: np.ndarray) -> np.ndarray | None:
+    if not csv_path.exists():
+        return None
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return None
+
+    time_candidates = ["t_s", "t", "time_s", "time", "Time(s)"]
+    comp_candidates = [
+        ["wx_km_s2", "wy_km_s2", "wz_km_s2"],
+        ["w_x_km_s2", "w_y_km_s2", "w_z_km_s2"],
+        ["wx", "wy", "wz"],
+        ["w_x", "w_y", "w_z"],
+        ["ax_km_s2", "ay_km_s2", "az_km_s2"],
+        ["ax", "ay", "az"],
+    ]
+
+    t_col = next((c for c in time_candidates if c in df.columns), None)
+    if t_col is None:
+        return None
+    comp_cols = next((cols for cols in comp_candidates if all(c in df.columns for c in cols)), None)
+    if comp_cols is None:
+        return None
+
+    t_src = df[t_col].to_numpy(float)
+    w_src = df[comp_cols].to_numpy(float)
+    if len(t_src) < 2:
+        return None
+
+    w_ref = np.column_stack([np.interp(t_target, t_src, w_src[:, i]) for i in range(3)])
+    return np.asarray(w_ref, dtype=float)
 
 
 def compute_metrics(out: dict) -> dict:
@@ -166,7 +200,14 @@ def make_sweep_plots(summary_df: pd.DataFrame, outdir: Path, opt_sigma_m_s2: flo
     plt.close(fig)
 
 
-def make_optimal_plots(out: dict, outdir: Path, R: np.ndarray, sigma_opt_m_s2: float, tau_s: float) -> None:
+def make_optimal_plots(
+    out: dict,
+    outdir: Path,
+    R: np.ndarray,
+    sigma_opt_m_s2: float,
+    tau_s: float,
+    w_ref_km_s2: np.ndarray | None = None,
+) -> None:
     t_hr = np.asarray(out["t_meas"], dtype=float) / 3600.0
     err = np.asarray(out["state_error_meas"], dtype=float)
     P = np.asarray(out["P_meas"], dtype=float)
@@ -252,6 +293,8 @@ def make_optimal_plots(out: dict, outdir: Path, R: np.ndarray, sigma_opt_m_s2: f
         fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
         for i in range(3):
             axs[i].plot(t_hr, w_hat[:, i], ".", markersize=2, label="w_hat")
+            if w_ref_km_s2 is not None and np.asarray(w_ref_km_s2).shape == w_hat.shape:
+                axs[i].plot(t_hr, w_ref_km_s2[:, i], "k", linewidth=1.0, label="J3 accel ref")
             axs[i].plot(t_hr, w_sig3[:, i], "r", linewidth=1.0, label="+3sigma")
             axs[i].plot(t_hr, -w_sig3[:, i], "r", linewidth=1.0, label="-3sigma")
             axs[i].set_ylabel(f"{w_labels[i]} [km/s^2]")
@@ -272,6 +315,8 @@ def make_optimal_plots(out: dict, outdir: Path, R: np.ndarray, sigma_opt_m_s2: f
             fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
             for i in range(3):
                 axs[i].plot(t_hr_w, w_hat_w[:, i], ".", markersize=2, label="w_hat")
+                if w_ref_km_s2 is not None and np.asarray(w_ref_km_s2).shape == w_hat.shape:
+                    axs[i].plot(t_hr_w, w_ref_km_s2[mask_w, i], "k", linewidth=1.0, label="J3 accel ref")
                 axs[i].plot(t_hr_w, w_sig3_w[:, i], "r", linewidth=1.0, label="+3sigma")
                 axs[i].plot(t_hr_w, -w_sig3_w[:, i], "r", linewidth=1.0, label="-3sigma")
                 axs[i].set_ylabel(f"{w_labels[i]} [km/s^2]")
@@ -312,24 +357,6 @@ def make_optimal_plots(out: dict, outdir: Path, R: np.ndarray, sigma_opt_m_s2: f
         fig.suptitle(f"EKF DMC Optimal Pww vs Time, sigma={sigma_opt_m_s2:.3e} m/s^2")
         fig.tight_layout()
         fig.savefig(diag_dir / "ekf_dmc_optimal_pww_vs_time.png", dpi=300, bbox_inches="tight")
-        plt.close(fig)
-
-        # sqrt(Pww) should be on the same units as acceleration sigma.
-        sqrt_pww = np.sqrt(pww)
-        sigma_km_s2 = float(sigma_opt_m_s2) * 1.0e-3
-        s_labels = ["sqrt(Pww_xx)", "sqrt(Pww_yy)", "sqrt(Pww_zz)"]
-        fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-        for i in range(3):
-            axs[i].semilogy(t_hr, np.maximum(sqrt_pww[:, i], 1.0e-30), ".", markersize=2, label=s_labels[i])
-            axs[i].axhline(sigma_km_s2, color="k", linestyle="--", linewidth=1.0, label="sigma (km/s^2)")
-            axs[i].set_ylabel(f"{s_labels[i]} [km/s^2]")
-            axs[i].grid(True, which="both")
-        axs[-1].set_xlabel("Time [hours]")
-        handles, leglabels = axs[0].get_legend_handles_labels()
-        fig.legend(handles, leglabels, loc="upper right")
-        fig.suptitle(f"EKF DMC Optimal sqrt(Pww) vs Time, sigma={sigma_opt_m_s2:.3e} m/s^2")
-        fig.tight_layout()
-        fig.savefig(diag_dir / "ekf_dmc_optimal_sqrt_pww_vs_time.png", dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -421,7 +448,30 @@ def main():
     out_opt = out_by_sigma[sigma_opt_m_s2]
     opt_dir = plot_dir / "Optimal"
     opt_dir.mkdir(parents=True, exist_ok=True)
-    make_optimal_plots(out_opt, opt_dir, R, sigma_opt_m_s2, tau_s)
+    t_opt = np.asarray(out_opt["t_meas"], dtype=float)
+
+    w_ref = None
+    csv_candidates = [
+        Path("../Homework2/j3_accel_reference.csv"),
+        Path("../Homework2/j3_accel.csv"),
+        Path("../Homework2/meas_data/j3_accel_reference.csv"),
+        Path("../Homework2/meas_data/prob2_j3_accel.csv"),
+    ]
+    for cpath in csv_candidates:
+        w_ref = load_w_ref_from_csv(cpath, t_opt)
+        if w_ref is not None:
+            print(f"Using J3 acceleration overlay CSV: {cpath}")
+            break
+    if w_ref is None:
+        w_ref_all = compute_w_ref_from_truth(Xtrue_meas, mu=mu, J2=J2, J3=J3)
+        if w_ref_all.shape[0] == t_opt.shape[0]:
+            w_ref = w_ref_all
+        else:
+            t_all = np.array([float(m["t"]) for m in all_meas], dtype=float)
+            w_ref = np.column_stack([np.interp(t_opt, t_all, w_ref_all[:, i]) for i in range(3)])
+        print("J3 acceleration overlay CSV not found; using model-difference reference from truth states.")
+
+    make_optimal_plots(out_opt, opt_dir, R, sigma_opt_m_s2, tau_s, w_ref_km_s2=w_ref)
 
     print(f"Initial orbit period used for tau: P = {period_s:.3f} s")
     print(f"DMC tau = P/30 = {tau_s:.3f} s")

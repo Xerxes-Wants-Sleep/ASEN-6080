@@ -215,28 +215,27 @@ def orbit_propagator_aug9(t, X9, Re=6378, j2=True, j3=True):
 
 def stm(t, state9: np.ndarray, phi: np.ndarray, rows_col_to_remove: np.ndarray, Re=6378, j2=True, j3=True):
 
-    '''Removed the rows and columns as needed
-       Flatten remaing matrSTMix into a colums for propagation
-       
-       A is the full 9x9 STM with dr, dv, dmu, dj2 and dj3
-       Rows and columns to remove indicate the states being removed from the full STM'''
+    '''Build the 6x6 A-matrix directly (rows_col_to_remove is always [6,7,8])
+       rather than building 9x9 and calling np.delete on every integrator step.'''
+    state9 = np.asarray(state9, dtype=float).reshape(-1)
     mu = state9[6]
     J2 = state9[7]
     J3 = state9[8]
-    A = state_builder(state9, Re=Re, j2=j2, j3=j3)
-    new_matrix = np.delete(A, rows_col_to_remove, axis=1)
-    A_new = np.delete(new_matrix, rows_col_to_remove, axis = 0)
+    r  = state9[0:3]
+    v  = state9[3:6]
+
+    # Build 6x6 A directly - no 9x9 allocation, no np.delete
+    G = dadr_wJ2J3(r, mu, J2, J3, Re=Re, j2=j2, j3=j3)   # 3x3 gravity gradient
+    a = accel_wJ2J3(r, mu, J2, J3, Re=Re, j2=j2, j3=j3)  # 3-vec acceleration
+
+    A_new = np.zeros((6, 6), dtype=float)
+    A_new[0:3, 3:6] = np.eye(3)   # dr/dt = v
+    A_new[3:6, 0:3] = G           # dv/dt = G * dr
+
     phi_dot = A_new @ phi
+    dxdt = np.hstack((v, a, 0.0, 0.0, 0.0))
 
-    r = state9[0:3]
-    v = state9[3:6]
-
-    # A[3:6, 6] == da_dmu == a/mu, so recover 'a' without a second accel call
-    a = A[3:6, 6] * mu
-    dxdt = np.hstack((v, a, 0, 0, 0))
-    phi_dot_flat = phi_dot.flatten()
-
-    return np.hstack((dxdt, phi_dot_flat))
+    return np.hstack((dxdt, phi_dot.reshape(-1)))
 
 
 ##### PROJ 1 Addons #####
