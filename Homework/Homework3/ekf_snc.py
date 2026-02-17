@@ -230,8 +230,8 @@ def main():
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 out = ekf.run(all_meas=all_meas, stations=stations, Xtrue_meas=Xtrue_meas)
-        except RuntimeError as exc:
-            run_error = str(exc)
+        except Exception as exc:
+            run_error = f"{type(exc).__name__}: {exc}"
 
         if out is not None:
             metrics = compute_metrics(out)

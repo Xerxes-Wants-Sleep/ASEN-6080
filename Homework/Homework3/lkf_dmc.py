@@ -70,7 +70,7 @@ def load_problem2_inputs():
 
     sigma_r0_km = 1.0
     sigma_v0_km_s = 1.0e-3
-    sigma_w0_km_s2 = 1.0e-9
+    sigma_w0_km_s2 = 1.0e-6
     P0 = np.diag(
         [
             sigma_r0_km**2,
@@ -221,6 +221,100 @@ def make_optimal_plots(out: dict, outdir: Path, R: np.ndarray, sigma_opt_m_s2: f
     fig.tight_layout()
     fig.savefig(outdir / "lkf_dmc_optimal_postfit_linear.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
+
+    # DMC diagnostics: w estimate with covariance and interval Q_ww(t).
+    diag_dir = outdir / "Diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    X9 = np.asarray(out.get("Xhat_meas_9", np.empty((0, 9))), dtype=float)
+    P9 = np.asarray(out.get("P_meas_9", np.empty((0, 9, 9))), dtype=float)
+    if X9.ndim == 2 and X9.shape[1] >= 9 and P9.ndim == 3 and P9.shape[1] >= 9:
+        w_hat = X9[:, 6:9]
+        w_sig3 = 3.0 * np.sqrt(np.maximum(np.diagonal(P9[:, 6:9, 6:9], axis1=1, axis2=2), 0.0))
+        w_labels = ["w_x", "w_y", "w_z"]
+
+        fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        for i in range(3):
+            axs[i].plot(t_hr, w_hat[:, i], ".", markersize=2, label="w_hat")
+            axs[i].plot(t_hr, w_sig3[:, i], "r", linewidth=1.0, label="+3sigma")
+            axs[i].plot(t_hr, -w_sig3[:, i], "r", linewidth=1.0, label="-3sigma")
+            axs[i].set_ylabel(f"{w_labels[i]} [km/s^2]")
+            axs[i].grid(True)
+        axs[-1].set_xlabel("Time [hours]")
+        fig.suptitle(f"LKF DMC Optimal w Estimate (+/-3sigma), sigma={sigma_opt_m_s2:.3e} m/s^2")
+        handles, leglabels = axs[0].get_legend_handles_labels()
+        fig.legend(handles, leglabels, loc="upper right")
+        fig.tight_layout()
+        fig.savefig(diag_dir / "lkf_dmc_optimal_w_estimate.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        mask_w = t_hr >= 4.0
+        if np.any(mask_w):
+            t_hr_w = t_hr[mask_w]
+            w_hat_w = w_hat[mask_w, :]
+            w_sig3_w = w_sig3[mask_w, :]
+            fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+            for i in range(3):
+                axs[i].plot(t_hr_w, w_hat_w[:, i], ".", markersize=2, label="w_hat")
+                axs[i].plot(t_hr_w, w_sig3_w[:, i], "r", linewidth=1.0, label="+3sigma")
+                axs[i].plot(t_hr_w, -w_sig3_w[:, i], "r", linewidth=1.0, label="-3sigma")
+                axs[i].set_ylabel(f"{w_labels[i]} [km/s^2]")
+                axs[i].grid(True)
+            axs[-1].set_xlabel("Time [hours]")
+            fig.suptitle(
+                f"LKF DMC Optimal w Estimate (+/-3sigma), t >= 4 h, sigma={sigma_opt_m_s2:.3e} m/s^2"
+            )
+            handles, leglabels = axs[0].get_legend_handles_labels()
+            fig.legend(handles, leglabels, loc="upper right")
+            fig.tight_layout()
+            fig.savefig(diag_dir / "lkf_dmc_optimal_w_estimate_t_ge_4h.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    qww = np.asarray(out.get("Qk_interval_ww_diag", np.empty((0, 3))), dtype=float)
+    if qww.ndim == 2 and qww.shape[1] == 3 and qww.shape[0] == t_hr.shape[0]:
+        q_labels = ["Qww_xx", "Qww_yy", "Qww_zz"]
+        fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        for i in range(3):
+            axs[i].semilogy(t_hr, np.maximum(qww[:, i], 1.0e-30), ".", markersize=2)
+            axs[i].set_ylabel(f"{q_labels[i]} [km^2/s^4]")
+            axs[i].grid(True, which="both")
+        axs[-1].set_xlabel("Time [hours]")
+        fig.suptitle(f"LKF DMC Optimal Interval Qww vs Time, sigma={sigma_opt_m_s2:.3e} m/s^2")
+        fig.tight_layout()
+        fig.savefig(diag_dir / "lkf_dmc_optimal_qww_vs_time.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    if P9.ndim == 3 and P9.shape[1] >= 9 and P9.shape[0] == t_hr.shape[0]:
+        pww = np.maximum(np.diagonal(P9[:, 6:9, 6:9], axis1=1, axis2=2), 1.0e-30)
+        p_labels = ["Pww_xx", "Pww_yy", "Pww_zz"]
+        fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        for i in range(3):
+            axs[i].semilogy(t_hr, pww[:, i], ".", markersize=2)
+            axs[i].set_ylabel(f"{p_labels[i]} [km^2/s^4]")
+            axs[i].grid(True, which="both")
+        axs[-1].set_xlabel("Time [hours]")
+        fig.suptitle(f"LKF DMC Optimal Pww vs Time, sigma={sigma_opt_m_s2:.3e} m/s^2")
+        fig.tight_layout()
+        fig.savefig(diag_dir / "lkf_dmc_optimal_pww_vs_time.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        # sqrt(Pww) should be on the same units as acceleration sigma.
+        sqrt_pww = np.sqrt(pww)
+        sigma_km_s2 = float(sigma_opt_m_s2) * 1.0e-3
+        s_labels = ["sqrt(Pww_xx)", "sqrt(Pww_yy)", "sqrt(Pww_zz)"]
+        fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        for i in range(3):
+            axs[i].semilogy(t_hr, np.maximum(sqrt_pww[:, i], 1.0e-30), ".", markersize=2, label=s_labels[i])
+            axs[i].axhline(sigma_km_s2, color="k", linestyle="--", linewidth=1.0, label="sigma (km/s^2)")
+            axs[i].set_ylabel(f"{s_labels[i]} [km/s^2]")
+            axs[i].grid(True, which="both")
+        axs[-1].set_xlabel("Time [hours]")
+        handles, leglabels = axs[0].get_legend_handles_labels()
+        fig.legend(handles, leglabels, loc="upper right")
+        fig.suptitle(f"LKF DMC Optimal sqrt(Pww) vs Time, sigma={sigma_opt_m_s2:.3e} m/s^2")
+        fig.tight_layout()
+        fig.savefig(diag_dir / "lkf_dmc_optimal_sqrt_pww_vs_time.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def main():

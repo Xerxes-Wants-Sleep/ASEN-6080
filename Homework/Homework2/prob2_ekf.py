@@ -25,13 +25,40 @@ t_meas = np.array([float(m["t"]) for m in all_meas], dtype=float)
 # -----------------------------
 # 2) Stations (same as HW1 / batch)
 # -----------------------------
-stations = [
-    Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944),
-    Stations("Station 2", lat_deg=40.427222,  lon_deg=355.749444),
-    Stations("Station 3", lat_deg=35.247164,  lon_deg=243.205000),
-]
+def build_stations():
+    theta0_deg = 122.0
+    w_earth_rad_per_s = 2.0 * np.pi / (3600.0 * 24.0)
+    radius_earth_km = 6378.0
+
+    return [
+        Stations(
+            "Station 1",
+            lat_deg=-35.398333,
+            lon_deg=148.981944,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+        Stations(
+            "Station 2",
+            lat_deg=40.427222,
+            lon_deg=355.749444,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+        Stations(
+            "Station 3",
+            lat_deg=35.247164,
+            lon_deg=243.205000,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+    ]
 
 
+stations = build_stations()
 # -----------------------------
 # 3) Measurement noise R
 # -----------------------------
@@ -39,6 +66,8 @@ sigma_rho_km = 1.0e-3          # 1 m = 1e-3 km
 sigma_rhod_km_s = 1.0e-6       # 1 mm/s = 1e-6 km/s
 R = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
 
+PLOTS_DIR = Path("Plots") / "EKF 2B_TakeTake"   
+PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------
 # 4) A priori covariance P0
@@ -46,8 +75,8 @@ R = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
 sigma_r0_km = 1.0
 sigma_v0_km_s = 1.0e-3
 
-sigma_r0_km = 1.0e3
-sigma_v0_km_s = 1.0
+# sigma_r0_km = 1.0e3
+# sigma_v0_km_s = 1.0
 
 P0 = np.diag([
     sigma_r0_km**2, sigma_r0_km**2, sigma_r0_km**2,
@@ -149,6 +178,7 @@ handles, leglabels = axs[0].get_legend_handles_labels()
 fig.legend(handles, leglabels, loc="upper right")
 fig.suptitle("EKF State Error vs Time (±3σ if available)", y=0.98)
 plt.tight_layout()
+fig.savefig(PLOTS_DIR / "ekf_state_error.png", dpi=300, bbox_inches="tight")
 
 # -----------------------------
 # 10) Plot: postfit residuals with ±3σ measurement noise bounds
@@ -174,6 +204,7 @@ axs[1].grid(True)
 
 fig.suptitle("EKF Postfit Residuals vs Time (±3σ noise bounds)", y=0.98)
 plt.tight_layout()
+fig.savefig(PLOTS_DIR / "ekf_postfit_residuals.png", dpi=300, bbox_inches="tight")
 
 # -----------------------------
 # 11) Print RMS summary table
@@ -230,5 +261,5 @@ handles, leglabels = axs[0].get_legend_handles_labels()
 fig.legend(handles, leglabels, loc="upper right")
 fig.suptitle("EKF State Error vs Time (Zoom: t ≥ 4000 s)", y=0.98)
 plt.tight_layout()
+fig.savefig(PLOTS_DIR / "ekf_state_error_zoom_t_ge_40000s.png", dpi=300, bbox_inches="tight")
 
-plt.show()

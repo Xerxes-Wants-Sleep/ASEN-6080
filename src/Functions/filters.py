@@ -393,6 +393,8 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             Pbar = Phi @ P @ Phi.T + Qk
 
             # ---- Observation at reference ----
+            # Compute station ECI once and reuse for G(), Htilde, and postfit
+            Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
             C = self.G(st, Xstar, t)
             if C is not None:
 
@@ -401,7 +403,6 @@ class LinearizedKalmanFilter(KalmanFilterBase):
                 residuals[j, :] = OminusC
 
                 # Linearize measurement about reference X*
-                Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
                 Htilde = H_range_rangerate(Xstar[:3], Xstar[3:], Rs, Vs)  # (2,6)
 
                 # Kalman gain
@@ -429,7 +430,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             P_pf[j, :] = P.reshape(-1, order="F")  
             two_sigma[j, :] = 2.0 * np.sqrt(np.maximum(np.diag(P), 0.0))
 
-            # Nonlinear post-fit residual (keep)
+            # Nonlinear post-fit residual (Rs/Vs already computed above, reused via measure())
             C_post = self.G(st, X_post, t)
             postfit_nl[j, :] = (Y - C_post) if (C_post is not None) else np.array([np.nan, np.nan], dtype=float)
 
@@ -666,6 +667,8 @@ class ExtendedKalmanFilter(KalmanFilterBase):
             Pbar = Phi @ P @ Phi.T + Qk
 
             # ---- Observation / prefit residual ----
+            # Compute station ECI once and reuse for G(), Htilde, and postfit
+            Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
             C = self.G(st, Xbar, t)
             if C is not None:
 
@@ -673,7 +676,6 @@ class ExtendedKalmanFilter(KalmanFilterBase):
                 residuals[j, :] = OminusC
 
                 # ---- Linearize measurement ----
-                Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
                 Htilde = H_range_rangerate(Xbar[:3], Xbar[3:], Rs, Vs)
 
                 # ---- Kalman gain ----
@@ -689,9 +691,10 @@ class ExtendedKalmanFilter(KalmanFilterBase):
                 x_hat_err = X_hat - Xbar
                 resid_pf[j, :] = OminusC - (Htilde @ x_hat_err)
 
-                # ---- Nonlinear post-fit residual (keep) ----
+                # ---- Nonlinear post-fit residual (reuse Rs, Vs already computed) ----
                 C_hat = self.G(st, X_hat, t)
                 postfit_nl[j, :] = (Y - C_hat) if (C_hat is not None) else np.array([np.nan, np.nan], dtype=float)
+
 
             else:
                 # No measurement update

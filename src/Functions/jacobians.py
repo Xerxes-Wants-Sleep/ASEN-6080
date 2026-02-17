@@ -231,7 +231,8 @@ def stm(t, state9: np.ndarray, phi: np.ndarray, rows_col_to_remove: np.ndarray, 
     r = state9[0:3]
     v = state9[3:6]
 
-    a = accel_wJ2J3(r, mu, J2, J3, Re=Re, j2=j2, j3=j3)
+    # A[3:6, 6] == da_dmu == a/mu, so recover 'a' without a second accel call
+    a = A[3:6, 6] * mu
     dxdt = np.hstack((v, a, 0, 0, 0))
     phi_dot_flat = phi_dot.flatten()
 

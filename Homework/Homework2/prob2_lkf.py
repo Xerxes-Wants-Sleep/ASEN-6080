@@ -26,13 +26,40 @@ t_meas = np.array([float(m["t"]) for m in all_meas], dtype=float)
 # -----------------------------
 # 2) Stations
 # -----------------------------
-stations = [
-    Stations("Station 1", lat_deg=-35.398333, lon_deg=148.981944),
-    Stations("Station 2", lat_deg=40.427222,  lon_deg=355.749444),
-    Stations("Station 3", lat_deg=35.247164,  lon_deg=243.205000),
-]
+def build_stations():
+    theta0_deg = 122.0
+    w_earth_rad_per_s = 2.0 * np.pi / (3600.0 * 24.0)
+    radius_earth_km = 6378.0
+
+    return [
+        Stations(
+            "Station 1",
+            lat_deg=-35.398333,
+            lon_deg=148.981944,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+        Stations(
+            "Station 2",
+            lat_deg=40.427222,
+            lon_deg=355.749444,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+        Stations(
+            "Station 3",
+            lat_deg=35.247164,
+            lon_deg=243.205000,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+    ]
 
 
+stations = build_stations()
 # -----------------------------
 # 3) Measurement noise R
 # -----------------------------
@@ -43,17 +70,17 @@ R = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
 
 
 
-PLOTS_DIR = Path("Plots") / "LKF 2B"   
+PLOTS_DIR = Path("Plots") / "LKF 2B_TakeTake"   
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------
 # 4) A priori covariance P0
 # -----------------------------
-# sigma_r0_km = 1.0
-# sigma_v0_km_s = 1.0e-3
+sigma_r0_km = 1.0
+sigma_v0_km_s = 1.0e-3
 
-sigma_r0_km = 1.0e3
-sigma_v0_km_s = 1.0
+# sigma_r0_km = 1.0e3
+# sigma_v0_km_s = 1.0
 
 
 P0 = np.diag([
@@ -71,9 +98,9 @@ Q = np.zeros((6, 6), dtype=float)
 # -----------------------------
 # 6) Truth + initial guess X0_star = X0_true + dx  (SAME AS BATCH)
 # -----------------------------
-# dx = np.array([0.1, -0.03, 0.25, 0.3e-3, -0.5e-3, 0.2e-3], dtype=float)
+dx = np.array([0.1, -0.03, 0.25, 0.3e-3, -0.5e-3, 0.2e-3], dtype=float)
 
-dx = 100 * np.array([0.1, -0.03, 0.25, 0.3e-3, -0.5e-3, 0.2e-3], dtype=float)
+# dx = 100 * np.array([0.1, -0.03, 0.25, 0.3e-3, -0.5e-3, 0.2e-3], dtype=float)
 
 
 

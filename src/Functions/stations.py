@@ -83,13 +83,18 @@ class Stations:
 
     def measure(self, r_sc_eci: np.ndarray, v_sc_eci: np.ndarray, t: float) -> dict | None:
 
-        elev = self.elevation(t, r_sc_eci)
-        
+        # Compute station ECI once and reuse for elevation check + measurement
+        r_st, v_st = self.station_eci(t)
+
+        rho_vec_elev = r_sc_eci - r_st
+        rho_hat_elev = rho_vec_elev / np.linalg.norm(rho_vec_elev)
+        up = r_st / np.linalg.norm(r_st)
+        elev = float(np.arcsin(np.dot(rho_hat_elev, up)))
+
         if elev < self.elevation_mask_rad:
             return None
-        
-        r_st, v_st = self.station_eci(t)
-        rho_vec = r_sc_eci - r_st
+
+        rho_vec = rho_vec_elev  # already computed above
         rho = np.linalg.norm(rho_vec)
         rho_hat = rho_vec / rho
 
@@ -105,20 +110,3 @@ class Stations:
         "rho_dot_km_s": float(rho_dot),
         "elev_rad": elev
         }
-
-
-
-
-
-
-
-
-    
-
-
-        
-        
-
-
-
-
