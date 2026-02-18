@@ -114,12 +114,12 @@ def make_sweep_plots(summary_df: pd.DataFrame, outdir: Path, opt_sigma_m_s2: flo
     axs[0].grid(True, which="both")
 
     axs[1].loglog(sigma, summary_df["rhodot_postfit_rms_km_s"], "o-", markersize=4)
-    axs[1].axvline(opt_sigma_m_s2, color="k", linestyle="--", linewidth=1, label="optimal sigma")
+    axs[1].axvline(opt_sigma_m_s2, color="k", linestyle="--", linewidth=1, label="optimal process-noise std")
     axs[1].set_ylabel("RMS range-rate postfit (linear) [km/s]")
-    axs[1].set_xlabel("sigma [m/s^2]")
+    axs[1].set_xlabel("Process Noise Acceleration (m/s^2)")
     axs[1].grid(True, which="both")
     axs[1].legend(loc="best")
-    fig.suptitle("LKF SNC (RIC Q) Sweep: Linear Postfit RMS vs sigma")
+    fig.suptitle("LKF SNC (RIC Q) Sweep: Linear Postfit RMS vs Process Noise Acceleration")
     fig.tight_layout()
     fig.savefig(outdir / "lkf_snc_ric_sweep_postfit_rms.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -131,12 +131,12 @@ def make_sweep_plots(summary_df: pd.DataFrame, outdir: Path, opt_sigma_m_s2: flo
     axs[0].grid(True, which="both")
 
     axs[1].loglog(sigma, summary_df["vel3_rms_km_s"], "o-", markersize=4)
-    axs[1].axvline(opt_sigma_m_s2, color="k", linestyle="--", linewidth=1, label="optimal sigma")
+    axs[1].axvline(opt_sigma_m_s2, color="k", linestyle="--", linewidth=1, label="optimal process-noise std")
     axs[1].set_ylabel("3D velocity RMS [km/s]")
-    axs[1].set_xlabel("sigma [m/s^2]")
+    axs[1].set_xlabel("Process Noise Acceleration (m/s^2)")
     axs[1].grid(True, which="both")
     axs[1].legend(loc="best")
-    fig.suptitle("LKF SNC (RIC Q) Sweep: 3D State RMS vs sigma")
+    fig.suptitle("LKF SNC (RIC Q) Sweep: 3D State RMS vs Process Noise Acceleration")
     fig.tight_layout()
     fig.savefig(outdir / "lkf_snc_ric_sweep_state_rms.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -159,7 +159,7 @@ def make_optimal_plots(out: dict, outdir: Path, R: np.ndarray, sigma_opt_m_s2: f
         axs[i].grid(True)
     axs[-2].set_xlabel("Time [hours]")
     axs[-1].set_xlabel("Time [hours]")
-    fig.suptitle(f"LKF Optimal SNC (RIC Q) State Errors (+/-3sigma), sigma={sigma_opt_m_s2:.3e} m/s^2")
+    fig.suptitle(f"LKF Optimal SNC (RIC Q) State Errors (+/-3sigma), Process Noise Acceleration={sigma_opt_m_s2:.3e}")
     handles, leglabels = axs[0].get_legend_handles_labels()
     fig.legend(handles, leglabels, loc="upper right")
     fig.tight_layout()
@@ -183,7 +183,7 @@ def make_optimal_plots(out: dict, outdir: Path, R: np.ndarray, sigma_opt_m_s2: f
             axs[i].grid(True)
         axs[-2].set_xlabel("Time [hours]")
         axs[-1].set_xlabel("Time [hours]")
-        fig.suptitle(f"LKF Optimal SNC (RIC Q) State Errors (+/-3sigma), t >= 5 h, sigma={sigma_opt_m_s2:.3e} m/s^2")
+        fig.suptitle(f"LKF Optimal SNC (RIC Q) State Errors (+/-3sigma), t >= 5 h, Process Noise Acceleration={sigma_opt_m_s2:.3e}")
         handles, leglabels = axs[0].get_legend_handles_labels()
         fig.legend(handles, leglabels, loc="upper right")
         fig.tight_layout()
@@ -210,7 +210,7 @@ def make_optimal_plots(out: dict, outdir: Path, R: np.ndarray, sigma_opt_m_s2: f
     axs[1].set_xlabel("Time [hours]")
     axs[1].grid(True)
 
-    fig.suptitle(f"LKF Optimal SNC (RIC Q) Linear Postfit Residuals, sigma={sigma_opt_m_s2:.3e} m/s^2")
+    fig.suptitle(f"LKF Optimal SNC (RIC Q) Linear Postfit Residuals, Process Noise Acceleration={sigma_opt_m_s2:.3e}")
     fig.tight_layout()
     fig.savefig(outdir / "lkf_optimal_postfit_linear_ricq.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -280,3 +280,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
