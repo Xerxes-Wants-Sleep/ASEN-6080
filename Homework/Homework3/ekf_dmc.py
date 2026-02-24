@@ -1,6 +1,9 @@
 import contextlib
 import io
+import os
 import sys
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -13,6 +16,8 @@ from src.Functions.dmc import ekf_with_dmc
 from src.Functions.jacobians import accel_wJ2J3
 from src.Functions.kep2cart import Keplarian_to_Cartesian
 from src.Functions.stations import Stations
+
+_SWEEP_CTX = None
 
 
 def rms_nan(x: np.ndarray) -> float:
@@ -127,6 +132,66 @@ def compute_metrics(out: dict) -> dict:
         "pos3_rms_km": rms_nan(np.linalg.norm(state_err[:, 0:3], axis=1)),
         "vel3_rms_km_s": rms_nan(np.linalg.norm(state_err[:, 3:6], axis=1)),
     }
+
+
+def _init_sigma_worker(ctx: dict) -> None:
+    global _SWEEP_CTX
+    _SWEEP_CTX = ctx
+
+
+def _run_sigma_worker(sigma_m_s2: float) -> dict:
+    ctx = _SWEEP_CTX
+    run_error = None
+    out = None
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = ekf_with_dmc(
+                all_meas=ctx["all_meas"],
+                stations=ctx["stations"],
+                X0_hat=ctx["x0_hat"],
+                P0=ctx["P0"],
+                R=ctx["R"],
+                mu=ctx["mu"],
+                J2=ctx["J2"],
+                J3=ctx["J3"],
+                tau_s=ctx["tau_s"],
+                sigma_accel_m_s2=float(sigma_m_s2),
+                Xtrue_meas=ctx["Xtrue_meas"],
+                reltol=1.0e-10,
+                abstol=1.0e-10,
+                method="DOP853",
+                j2=True,
+                j3=False,
+                dt_max_s=ctx["dt_max_s"],
+                first_pass_gap_s=6 * 3600.0,
+                bootstrap_steps=ctx["bootstrap_steps"],
+            )
+    except Exception as exc:
+        run_error = f"{type(exc).__name__}: {exc}"
+
+    if out is not None:
+        metrics = compute_metrics(out)
+    else:
+        metrics = {
+            "rho_postfit_rms_km": np.nan,
+            "rhodot_postfit_rms_km_s": np.nan,
+            "pos3_rms_km": np.nan,
+            "vel3_rms_km_s": np.nan,
+        }
+
+    row = {"sigma_m_s2": float(sigma_m_s2)}
+    row.update(metrics)
+    row["run_ok"] = out is not None
+    row["run_error"] = run_error
+    if out is not None:
+        row["num_updates"] = int(out.get("dmc_num_updates", -1))
+        row["num_skips"] = int(out.get("dmc_num_skipped", -1))
+    else:
+        row["num_updates"] = np.nan
+        row["num_skips"] = np.nan
+
+    return row
 
 
 def make_sweep_plots(summary_df: pd.DataFrame, outdir: Path, opt_sigma_m_s2: float, tau_s: float) -> None:
@@ -270,7 +335,7 @@ def make_optimal_plots(
 
         fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
         for i in range(3):
-            axs[i].plot(t_hr, w_hat[:, i], "-", linewidth=1.0, label="w_hat")
+            axs[i].plot(t_hr, w_hat[:, i], ".", markersize=2, label="w_hat")
             if w_truth is not None and t_truth_hr is not None:
                 axs[i].plot(t_truth_hr, w_truth[:, i], "k", linewidth=1.0, label="J3 accel truth")
             elif w_ref_km_s2 is not None and np.asarray(w_ref_km_s2).shape == w_hat.shape:
@@ -360,71 +425,46 @@ def main():
     all_meas, Xtrue_meas, stations, R, P0, x0_hat, x0_true, truth_times, truth_states = load_problem2_inputs(mu_km3_s2=mu)
 
     period_s = initial_orbit_period_s(x0_true, mu)
-    tau_s = period_s / 30.0
-    dt_max_s = 60.0
+    tau_s = period_s / 30
+    dt_max_s = 300
 
     sigma_sweep_m_s2 = np.logspace(-15, -2, 14)
     bootstrap_steps = 50
 
-    plot_dir = Path("Plots") / "EKF_DMC"
+    plot_dir = Path("Plots") / "EKF_DMC_Diff_Tau2"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = []
-    out_by_sigma = {}
+    worker_ctx = {
+        "all_meas": all_meas,
+        "Xtrue_meas": Xtrue_meas,
+        "stations": stations,
+        "R": R,
+        "P0": P0,
+        "x0_hat": x0_hat,
+        "mu": mu,
+        "J2": J2,
+        "J3": J3,
+        "tau_s": tau_s,
+        "dt_max_s": dt_max_s,
+        "bootstrap_steps": bootstrap_steps,
+    }
 
-    for sigma_m_s2 in sigma_sweep_m_s2:
-        run_error = None
-        out = None
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                out = ekf_with_dmc(
-                    all_meas=all_meas,
-                    stations=stations,
-                    X0_hat=x0_hat,
-                    P0=P0,
-                    R=R,
-                    mu=mu,
-                    J2=J2,
-                    J3=J3,
-                    tau_s=tau_s,
-                    sigma_accel_m_s2=float(sigma_m_s2),
-                    Xtrue_meas=Xtrue_meas,
-                    reltol=1.0e-10,
-                    abstol=1.0e-10,
-                    method="DOP853",
-                    j2=True,
-                    j3=False,
-                    dt_max_s=dt_max_s,
-                    first_pass_gap_s=6 * 3600.0,
-                    bootstrap_steps=bootstrap_steps,
-                )
-        except Exception as exc:
-            run_error = f"{type(exc).__name__}: {exc}"
+    requested_workers = int(os.environ.get("EKF_DMC_MAX_WORKERS", "0") or "0")
+    default_workers = max(1, min(len(sigma_sweep_m_s2), max(1, (os.cpu_count() or 2) - 1)))
+    max_workers = requested_workers if requested_workers > 0 else default_workers
 
-        if out is not None:
-            metrics = compute_metrics(out)
-        else:
-            metrics = {
-                "rho_postfit_rms_km": np.nan,
-                "rhodot_postfit_rms_km_s": np.nan,
-                "pos3_rms_km": np.nan,
-                "vel3_rms_km_s": np.nan,
-            }
+    try:
+        mp_ctx = mp.get_context("fork")
+    except ValueError:
+        mp_ctx = mp.get_context()
 
-        row = {"sigma_m_s2": float(sigma_m_s2)}
-        row.update(metrics)
-        row["run_ok"] = out is not None
-        row["run_error"] = run_error
-        if out is not None:
-            row["num_updates"] = int(out.get("dmc_num_updates", -1))
-            row["num_skips"] = int(out.get("dmc_num_skipped", -1))
-        else:
-            row["num_updates"] = np.nan
-            row["num_skips"] = np.nan
-        rows.append(row)
-
-        if out is not None:
-            out_by_sigma[float(sigma_m_s2)] = out
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=mp_ctx,
+        initializer=_init_sigma_worker,
+        initargs=(worker_ctx,),
+    ) as ex:
+        rows = list(ex.map(_run_sigma_worker, sigma_sweep_m_s2))
 
     summary_df = pd.DataFrame(rows).sort_values("sigma_m_s2")
     valid_df = summary_df[np.isfinite(summary_df["pos3_rms_km"].to_numpy(float))]
@@ -438,7 +478,28 @@ def main():
 
     make_sweep_plots(valid_df, plot_dir, sigma_opt_m_s2, tau_s)
 
-    out_opt = out_by_sigma[sigma_opt_m_s2]
+    with contextlib.redirect_stdout(io.StringIO()):
+        out_opt = ekf_with_dmc(
+            all_meas=all_meas,
+            stations=stations,
+            X0_hat=x0_hat,
+            P0=P0,
+            R=R,
+            mu=mu,
+            J2=J2,
+            J3=J3,
+            tau_s=tau_s,
+            sigma_accel_m_s2=float(sigma_opt_m_s2),
+            Xtrue_meas=Xtrue_meas,
+            reltol=1.0e-10,
+            abstol=1.0e-10,
+            method="DOP853",
+            j2=True,
+            j3=False,
+            dt_max_s=dt_max_s,
+            first_pass_gap_s=6 * 3600.0,
+            bootstrap_steps=bootstrap_steps,
+        )
     opt_dir = plot_dir / "Optimal"
     opt_dir.mkdir(parents=True, exist_ok=True)
     t_opt = np.asarray(out_opt["t_meas"], dtype=float)
@@ -459,6 +520,7 @@ def main():
     print(f"Initial orbit period used for tau: P = {period_s:.3f} s")
     print(f"DMC tau = P/30 = {tau_s:.3f} s")
     print(f"EKF DMC bootstrap steps = {bootstrap_steps}")
+    print(f"Parallel sigma workers: {max_workers}")
     print(f"\nOptimal sigma (EKF DMC, by minimum 3D position RMS): {sigma_opt_m_s2:.6e} m/s^2")
     print(valid_df.iloc[best_idx].to_string())
     failed_count = int((~summary_df["run_ok"]).sum())

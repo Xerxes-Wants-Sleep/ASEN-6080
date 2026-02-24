@@ -45,6 +45,8 @@ class KalmanFilterBase:
         dt = max(float(delta_t), 0.0)
         if dt == 0.0:
             return np.zeros((6, 6), dtype=float)
+        
+        
 
         q_frame = str(getattr(self, "q_frame", "eci")).strip().lower()
         if q_frame == "eci":
@@ -328,11 +330,95 @@ class LinearizedKalmanFilter(KalmanFilterBase):
         rho = d["rho_km"] if "rho_km" in d else d["rho"]
         rhod = d["rho_dot_km_s"] if "rho_dot_km_s" in d else d["rho_dot"]
         return np.array([rho, rhod], dtype=float)
+    
+
+
+
+
+
+    @staticmethod
+    def rts_smoother(
+        x_filt_hist,
+        P_filt_hist,
+        x_pred_hist,
+        P_pred_hist,
+        Phi_step_hist,
+        smooth_back_points: int | None = None,
+    ):
+        """
+        Rauch–Tung–Striebel smoother for the linear time-varying system.
+
+        Inputs:
+        x_filt_hist[k] = x_{k|k}
+        P_filt_hist[k] = P_{k|k}
+        x_pred_hist[k] = x_{k|k-1}
+        P_pred_hist[k] = P_{k|k-1}
+        Phi_step_hist[k] = Phi_{k,k-1}   (with Phi_step_hist[0] = I)
+
+        smooth_back_points:
+        None  -> smooth full interval (fixed-interval RTS)
+        K     -> smooth only the last K points backward (earlier points remain filtered)
+
+        Returns:
+        x_smooth[k] = x_{k|N}
+        P_smooth[k] = P_{k|N}
+        """
+        x_filt_hist = np.asarray(x_filt_hist, dtype=float)
+        P_filt_hist = np.asarray(P_filt_hist, dtype=float)
+        x_pred_hist = np.asarray(x_pred_hist, dtype=float)
+        P_pred_hist = np.asarray(P_pred_hist, dtype=float)
+        Phi_step_hist = np.asarray(Phi_step_hist, dtype=float)
+
+        N = x_filt_hist.shape[0]
+        x_smooth = x_filt_hist.copy()
+        P_smooth = P_filt_hist.copy()
+        if N == 0:
+            return x_smooth, P_smooth
+
+        I6 = np.eye(6)
+
+        # initialize at final time
+        # x_smooth[N-1] = x_{N-1|N-1}
+        # P_smooth[N-1] = P_{N-1|N-1}
+
+        if smooth_back_points is None:
+            k_min = 0
+        else:
+            Kback = int(smooth_back_points)
+            if Kback <= 1:
+                return x_smooth, P_smooth
+            Kback = min(Kback, N)
+            k_min = N - Kback
+
+        for k in range(N - 2, k_min - 1, -1):
+            Phi_kp1_k = Phi_step_hist[k + 1]      # Phi_{k+1,k}
+            P_k_k     = P_filt_hist[k]
+            P_kp1_k   = P_pred_hist[k + 1]        # P_{k+1|k}
+
+            # Ck = P_k_k Phi^T (P_{k+1|k})^{-1}  (use solve, not inv)
+            # Solve: P_kp1_k * X = I  -> X = inv(P_kp1_k)
+            invP = np.linalg.solve(P_kp1_k, I6)
+            Ck = (P_k_k @ Phi_kp1_k.T) @ invP
+
+            x_smooth[k] = x_filt_hist[k] + Ck @ (x_smooth[k + 1] - x_pred_hist[k + 1])
+            P_smooth[k] = P_filt_hist[k] + Ck @ (P_smooth[k + 1] - P_pred_hist[k + 1]) @ Ck.T
+
+            # optional: enforce symmetry (helps numerics)
+            P_smooth[k] = 0.5 * (P_smooth[k] + P_smooth[k].T)
+
+        return x_smooth, P_smooth
 
     # ------------------------------------------------------------
     # RUN
     # ------------------------------------------------------------
-    def run(self, all_meas, stations, Xtrue_meas: np.ndarray | None = None):
+    def run(
+        self,
+        all_meas,
+        stations,
+        Xtrue_meas: np.ndarray | None = None,
+        run_smoother: bool = False,
+        smooth_back_points: int | None = None,
+    ):
         # -----------------------------
         # 0) Setup / sort
         # -----------------------------
@@ -365,6 +451,11 @@ class LinearizedKalmanFilter(KalmanFilterBase):
         P_meas = np.full((N, 6, 6), np.nan, dtype=float)    # post-fit covariance (3D)
         P_pf  = np.full((N, 36), np.nan, dtype=float)       # Reshape(Covariance)
         two_sigma = np.full((N, 6), np.nan, dtype=float)
+        x_pred_hist = np.zeros((N, 6), dtype=float)         # x_{k|k-1}
+        P_pred_hist = np.zeros((N, 6, 6), dtype=float)      # P_{k|k-1}
+        x_filt_hist = np.zeros((N, 6), dtype=float)         # x_{k|k}
+        P_filt_hist = np.zeros((N, 6, 6), dtype=float)      # P_{k|k}
+        # Phi_step already exists as (N,6,6) with Phi_step[j] = Phi_{j,j-1}
 
         state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
 
@@ -391,6 +482,8 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             Qk = self.build_process_noise(dt, r_eci=Xstar[:3], v_eci=Xstar[3:6])
             xbar = Phi @ x_hat
             Pbar = Phi @ P @ Phi.T + Qk
+            x_pred_hist[j, :] = xbar
+            P_pred_hist[j, :, :] = Pbar
 
             # ---- Observation at reference ----
             # Compute station ECI once and reuse for G(), Htilde, and postfit
@@ -423,6 +516,9 @@ class LinearizedKalmanFilter(KalmanFilterBase):
                 x_hat = xbar
                 P = Pbar
 
+            x_filt_hist[j, :] = x_hat
+            P_filt_hist[j, :, :] = P
+
             # ---- Post-fit state + store outputs ----
             X_post = Xstar + x_hat
             X_pf[j, :] = X_post
@@ -449,6 +545,48 @@ class LinearizedKalmanFilter(KalmanFilterBase):
 
         rms_final = self.print_rms_summary(label="LKF", first_pass_gap_s=self.first_pass_gap_s)
 
+        smoother_ran = bool(run_smoother)
+        x_smooth_err = None
+        X_smooth = None
+        P_smooth = None
+        three_sigma_smooth = None
+        state_error_smooth = None
+        postfit_lin_smooth = None
+
+        if smoother_ran:
+            x_smooth_err, P_smooth = self.rts_smoother(
+                x_filt_hist=x_filt_hist,
+                P_filt_hist=P_filt_hist,
+                x_pred_hist=x_pred_hist,
+                P_pred_hist=P_pred_hist,
+                Phi_step_hist=Phi_step,
+                smooth_back_points=smooth_back_points,
+            )
+
+            X_smooth = Xstar_hist + x_smooth_err
+            three_sigma_smooth = 3.0 * np.sqrt(
+                np.maximum(np.diagonal(P_smooth, axis1=1, axis2=2), 0.0)
+            )
+
+            if Xtrue_meas is not None:
+                state_error_smooth = X_smooth - Xtrue_meas
+
+            # Derived linearized post-fit residual using smoothed error-state:
+            #   r_pf,lin,smooth = (O - C_ref) - H_tilde x_{k|N}
+            postfit_lin_smooth = np.full((N, 2), np.nan, dtype=float)
+            for j in range(N):
+                t = float(t_meas[j])
+                st = station_map[st_meas[j]]
+                Xstar = Xstar_hist[j, :]
+
+                C_ref = self.G(st, Xstar, t)
+                if C_ref is None:
+                    continue
+
+                Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
+                Htilde = H_range_rangerate(Xstar[:3], Xstar[3:], Rs, Vs)
+                postfit_lin_smooth[j, :] = residuals[j, :] - (Htilde @ x_smooth_err[j, :])
+
         return {
             "t_meas": t_meas,
             "station_meas": st_meas,
@@ -467,12 +605,25 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             "P_meas": P_meas,
             "Phat_meas": P_meas,  # alias (helps later if you warmstart)
             "P_pf": P_pf,
+            "x_pred_hist": x_pred_hist,
+            "P_pred_hist": P_pred_hist,
+            "x_filt_hist": x_filt_hist,
+            "P_filt_hist": P_filt_hist,
+            "Phi_step": Phi_step,
+            "smoother_ran": smoother_ran,
+            "x_smooth_err": x_smooth_err,          # smoothed error-state wrt reference X*(t)
+            "Xhat_smooth": X_smooth,               # smoothed full state = X*(t) + x_smooth_err
+            "P_smooth": P_smooth,                  # smoothed covariance
+            "two_sigma_smooth": three_sigma_smooth,  # actually +/-3 sigma (name kept for compatibility)
+            "state_error_smooth_meas": state_error_smooth,
+            "postfit_resids_linear_smooth": postfit_lin_smooth,
 
             "two_sigma_meas": two_sigma,
             "state_error_meas": state_error,
             "rms_final": rms_final,
-            "rms_by_iter": None
+            "rms_by_iter": None,
         }
+    
 
 
 

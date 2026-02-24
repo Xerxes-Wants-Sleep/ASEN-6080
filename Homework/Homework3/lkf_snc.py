@@ -86,7 +86,7 @@ def load_problem2_inputs():
         ]
     )
 
-    dx = np.array([0.1, -0.03, 0.25, 0.3e-3, -0.5e-3, 0.2e-3], dtype=float)
+    dx = np.array([0.1, -0.03, 0.25, 0.3e-3, -0.5e-3, 0.2e-3], dtype=float) / 4
     x0_star = x0_true + dx
 
     return all_meas, Xtrue_meas, stations, R, P0, x0_star
@@ -223,9 +223,9 @@ def main():
     J2 = 0.0010826269
     J3 = -2.5324e-6
 
-    sigma_sweep_m_s2 = np.logspace(-15, -2, 13)
+    sigma_sweep_m_s2 = np.logspace(-15, -2, 28)
 
-    plot_dir = Path("Plots") / "LKF_SNC"
+    plot_dir = Path("Plots") / "LKF_SNC_TESTTESTTES_2222"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []

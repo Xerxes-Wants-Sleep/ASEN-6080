@@ -356,11 +356,11 @@ def main():
     J3 = -2.5324e-6
 
     period_s = initial_orbit_period_s(x0_star, mu)
-    tau_s = period_s / 30.0
+    tau_s = period_s / 100.0
 
     sigma_sweep_m_s2 = np.logspace(-15, -2, 13)
 
-    plot_dir = Path("Plots") / "LKF_DMC"
+    plot_dir = Path("Plots") / "LKF_DMC_Diff_Tau"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []

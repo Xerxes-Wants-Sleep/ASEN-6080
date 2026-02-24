@@ -151,10 +151,26 @@ def print_rms_summary(result: BatchPostProcessResult, ignore_first_pass: bool = 
 
         rms_pos = rms_nan(np.linalg.norm(e[keep, 0:3], axis=1))
         rms_vel = rms_nan(np.linalg.norm(e[keep, 3:6], axis=1))
+        rms_comp = np.array([
+            rms_nan(e[keep, 0]),
+            rms_nan(e[keep, 1]),
+            rms_nan(e[keep, 2]),
+            rms_nan(e[keep, 3]),
+            rms_nan(e[keep, 4]),
+            rms_nan(e[keep, 5]),
+        ])
 
         print(f"\nState RMS {suffix}")
         print(f"  POS 3-norm = {rms_pos:g} m")
         print(f"  VEL 3-norm = {rms_vel:g} m/s")
+        print(
+            "  Components [m]: "
+            f"x = {rms_comp[0]:g}, y = {rms_comp[1]:g}, z = {rms_comp[2]:g}"
+        )
+        print(
+            "  Components [m/s]: "
+            f"vx = {rms_comp[3]:g}, vy = {rms_comp[4]:g}, vz = {rms_comp[5]:g}"
+        )
 
         if result.pos_err_rsw is not None:
             rms_rsw = np.array([
