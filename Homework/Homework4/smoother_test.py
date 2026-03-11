@@ -1,5 +1,4 @@
 import sys
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -119,6 +118,32 @@ def print_state_error_summary(label: str, result):
     print(f"  |dv| RMS = {vel_rms:.6e}")
 
 
+def print_component_rms_comparison_table(result_no, result_sm):
+    e_no = np.asarray(result_no.state_error_meas, dtype=float)
+    e_sm = np.asarray(result_sm.state_error_meas, dtype=float)
+    if e_no.shape != e_sm.shape:
+        raise RuntimeError("Filtered and smoothed state-error arrays do not have matching shapes.")
+
+    labels = ["x", "y", "z", "vx", "vy", "vz"]
+    units = ["m", "m", "m", "m/s", "m/s", "m/s"]
+
+    rms_no = np.sqrt(np.nanmean(e_no**2, axis=0))
+    rms_sm = np.sqrt(np.nanmean(e_sm**2, axis=0))
+    delta = rms_sm - rms_no
+    pct = np.full(6, np.nan, dtype=float)
+    nz = np.abs(rms_no) > 0.0
+    pct[nz] = 100.0 * delta[nz] / rms_no[nz]
+
+    print("\nComponent RMS Comparison (complete dataset)")
+    print("  LKF filtered vs RTS smoothed")
+    print(f"  {'Comp':<4s} {'Unit':<4s} {'RMS no smooth':>16s} {'RMS smooth':>16s} {'Delta':>14s} {'Delta %':>10s}")
+    for i in range(6):
+        print(
+            f"  {labels[i]:<4s} {units[i]:<4s} "
+            f"{rms_no[i]:16.6e} {rms_sm[i]:16.6e} {delta[i]:14.6e} {pct[i]:10.3f}"
+        )
+
+
 def main():
     all_meas, Xtrue_meas, stations, R, P0, x0_bar = load_problem2_inputs()
 
@@ -171,6 +196,7 @@ def main():
 
     print_state_error_summary("No smoother (filtered)", result_no)
     print_state_error_summary("With smoother (RTS)", result_sm)
+    print_component_rms_comparison_table(result_no, result_sm)
 
     print_rms_summary(result_no, ignore_first_pass=False)
     print_rms_summary(result_sm, ignore_first_pass=False)

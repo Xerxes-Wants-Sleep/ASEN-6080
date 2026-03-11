@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-from .jacobians import stm
+from .jacobians import stm, accel_wJ2J3
 from .range_rangerate import H_range_rangerate
 from .snc import state_noise_compensation, eci_to_ric_rotation
  
@@ -1071,5 +1071,346 @@ class ExtendedKalmanFilter(KalmanFilterBase):
 
             "P_pf": P_pf_comb,
             "rms_final": rms_combined,
+            "rms_by_iter": None,
+        }
+
+
+
+
+class UnscentedKalmanFilter(KalmanFilterBase):
+    """
+    Full-state UKF for nonlinear orbit determination.
+
+    State:
+        X = [rx, ry, rz, vx, vy, vz]
+
+    Measurement:
+        y = [rho, rho_dot]
+    """
+
+    def __init__(
+        self,
+        X0: np.ndarray,
+        P0: np.ndarray,
+        R: np.ndarray,
+        Q: np.ndarray,
+        mu: float,
+        J2: float,
+        J3: float,
+        Re: float = 6378.0,
+        alpha: float = 1e-3,
+        beta: float = 2.0,
+        kappa: float | None = None,
+        reltol: float = 1e-10,
+        abstol: float = 1e-10,
+        method: str = "DOP853",
+        j2: bool = True,
+        j3: bool = False,
+        first_pass_gap_s: float = 6 * 3600.0,
+    ):
+        super().__init__(X0, P0, R, Q)
+
+        self.X0 = np.asarray(X0, dtype=float).reshape(6,).copy()
+
+        self.mu = float(mu)
+        self.J2 = float(J2)
+        self.J3 = float(J3)
+        self.Re = float(Re)
+
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.kappa = 3.0 - 6 if kappa is None else float(kappa)
+
+        self.reltol = float(reltol)
+        self.abstol = float(abstol)
+        self.method = str(method)
+
+        self.j2 = bool(j2)
+        self.j3 = bool(j3)
+
+        self.first_pass_gap_s = float(first_pass_gap_s)
+
+    @staticmethod
+    def G(station, X6: np.ndarray, t: float):
+        d = station.measure(X6[:3], X6[3:], float(t))
+        if d is None:
+            return None
+        rho = d["rho_km"] if "rho_km" in d else d["rho"]
+        rhod = d["rho_dot_km_s"] if "rho_dot_km_s" in d else d["rho_dot"]
+        return np.array([rho, rhod], dtype=float)
+
+    @staticmethod
+    def _symmetrize(P: np.ndarray) -> np.ndarray:
+        return 0.5 * (P + P.T)
+
+    @staticmethod
+    def _project_spd(P: np.ndarray, rel_floor: float = 1e-14, abs_floor: float = 1e-18) -> np.ndarray:
+        """
+        Project a symmetric matrix to SPD by flooring eigenvalues.
+        """
+        Psym = 0.5 * (P + P.T)
+        evals, evecs = np.linalg.eigh(Psym)
+        scale = max(float(np.max(np.abs(evals))), 1.0)
+        floor = max(abs_floor, rel_floor * scale)
+        evals_clipped = np.maximum(evals, floor)
+        return (evecs * evals_clipped) @ evecs.T
+
+    def _safe_cholesky(self, P: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Return (L, P_spd) where L is lower-triangular Cholesky factor of P_spd.
+        """
+        Psym = self._symmetrize(np.asarray(P, dtype=float))
+        try:
+            return np.linalg.cholesky(Psym), Psym
+        except np.linalg.LinAlgError:
+            Pspd = self._project_spd(Psym)
+            n = Pspd.shape[0]
+            scale = max(float(np.mean(np.abs(np.diag(Pspd)))), 1.0)
+            jitter = 1e-15 * scale
+            I = np.eye(n, dtype=float)
+            for _ in range(8):
+                try:
+                    Ptry = self._symmetrize(Pspd + jitter * I)
+                    return np.linalg.cholesky(Ptry), Ptry
+                except np.linalg.LinAlgError:
+                    jitter *= 10.0
+            raise
+
+    def _propagate_sigma_points(self, Chi_in: np.ndarray, t0: float, t1: float) -> np.ndarray:
+        """
+        Propagate all sigma points over [t0, t1] in one stacked ODE integration.
+        """
+        if t1 == t0:
+            return Chi_in.copy()
+
+        n, nsig = Chi_in.shape
+        x0 = Chi_in.reshape(-1, order="F")
+
+        def dyn(tt, x_flat):
+            X = x_flat.reshape(n, nsig, order="F")
+            dX = np.zeros_like(X)
+            dX[0:3, :] = X[3:6, :]
+
+            for k in range(nsig):
+                r = X[0:3, k]
+                a = accel_wJ2J3(
+                    r,
+                    mu=self.mu,
+                    J2=self.J2 if self.j2 else 0.0,
+                    J3=self.J3 if self.j3 else 0.0,
+                    Re=self.Re,
+                )
+                dX[3:6, k] = a
+
+            return dX.reshape(-1, order="F")
+
+        sol = solve_ivp(
+            dyn,
+            (t0, t1),
+            x0,
+            rtol=self.reltol,
+            atol=self.abstol,
+            method=self.method,
+            t_eval=[t1],
+        )
+        if not sol.success:
+            raise RuntimeError(f"UKF sigma-point propagation failed: {sol.message}")
+        return sol.y[:, -1].reshape(n, nsig, order="F")
+
+    def run(
+        self,
+        all_meas,
+        stations,
+        Xtrue_meas: np.ndarray | None = None,
+    ):
+        # -----------------------------
+        # 0) Setup / sort
+        # -----------------------------
+        station_map = {st.name: st for st in stations}
+        all_meas = sorted(all_meas, key=lambda m: float(m["t"]))
+
+        t_meas = np.array([float(m["t"]) for m in all_meas], dtype=float)
+        st_meas = [m["station"] for m in all_meas]
+        N = len(all_meas)
+
+        if Xtrue_meas is not None:
+            Xtrue_meas = np.asarray(Xtrue_meas, dtype=float)
+            if Xtrue_meas.shape != (N, 6):
+                raise ValueError(f"Xtrue_meas must have shape ({N}, 6).")
+
+        # -----------------------------
+        # 1) UKF constants
+        # -----------------------------
+        n = 6
+        lam = self.alpha**2 * (n + self.kappa) - n
+        gamma = np.sqrt(n + lam)
+
+        Wm = np.full(2 * n + 1, 1.0 / (2.0 * (n + lam)), dtype=float)
+        Wc = np.full(2 * n + 1, 1.0 / (2.0 * (n + lam)), dtype=float)
+
+        Wm[0] = lam / (n + lam)
+        Wc[0] = lam / (n + lam) + (1.0 - self.alpha**2 + self.beta)
+
+        # -----------------------------
+        # 2) Allocate outputs
+        # -----------------------------
+        residuals = np.full((N, 2), np.nan, dtype=float)
+        postfit_nl = np.full((N, 2), np.nan, dtype=float)
+
+        X_pf = np.full((N, 6), np.nan, dtype=float)
+        P_meas = np.full((N, 6, 6), np.nan, dtype=float)
+        P_pf = np.full((N, 36), np.nan, dtype=float)
+        two_sigma = np.full((N, 6), np.nan, dtype=float)
+
+        X_pred_hist = np.full((N, 6), np.nan, dtype=float)
+        P_pred_hist = np.full((N, 6, 6), np.nan, dtype=float)
+
+        state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
+
+        # -----------------------------
+        # 3) Initialize filter
+        # -----------------------------
+        X_im1 = self.X0.copy()
+        P_im1 = np.asarray(self.P0, dtype=float).copy()
+
+        # -----------------------------
+        # 4) Main filter loop
+        # -----------------------------
+        for j in range(N):
+            t = float(t_meas[j])
+            st = station_map[st_meas[j]]
+
+            Y = np.array(
+                [all_meas[j]["rho_km"], all_meas[j]["rho_dot_km_s"]],
+                dtype=float,
+            )
+
+            t_prev = t if j == 0 else float(t_meas[j - 1])
+            dt = 0.0 if j == 0 else (t - t_prev)
+
+            # ---- Process noise
+            Qk = self.build_process_noise(dt, r_eci=X_im1[:3], v_eci=X_im1[3:6])
+
+            # ---- Sigma points from previous posterior
+            S_im1, P_im1 = self._safe_cholesky(P_im1)
+
+            Chi_im1 = np.zeros((n, 2 * n + 1), dtype=float)
+            Chi_im1[:, 0] = X_im1
+            for i in range(n):
+                col = gamma * S_im1[:, i]
+                Chi_im1[:, i + 1] = X_im1 + col
+                Chi_im1[:, i + 1 + n] = X_im1 - col
+
+            # ---- Propagate sigma points through nonlinear dynamics
+            Chi_minus = self._propagate_sigma_points(Chi_im1, t_prev, t)
+
+            # ---- Time update
+            X_minus = Chi_minus @ Wm
+
+            P_minus = Qk.copy()
+            for i in range(2 * n + 1):
+                dx = (Chi_minus[:, i] - X_minus).reshape(-1, 1)
+                P_minus += Wc[i] * (dx @ dx.T)
+            P_minus = self._symmetrize(P_minus)
+
+            X_pred_hist[j, :] = X_minus
+            P_pred_hist[j, :, :] = P_minus
+
+            # ---- Recompute sigma points from predicted distribution
+            S_minus, P_minus = self._safe_cholesky(P_minus)
+
+            Chi_pred = np.zeros((n, 2 * n + 1), dtype=float)
+            Chi_pred[:, 0] = X_minus
+            for i in range(n):
+                col = gamma * S_minus[:, i]
+                Chi_pred[:, i + 1] = X_minus + col
+                Chi_pred[:, i + 1 + n] = X_minus - col
+
+            # ---- Push sigma points through nonlinear measurement model
+            YSig = np.zeros((2, 2 * n + 1), dtype=float)
+            for i in range(2 * n + 1):
+                yi = self.G(st, Chi_pred[:, i], t)
+                if yi is None:
+                    X_i = X_minus
+                    P_i = P_minus
+                    break
+                YSig[:, i] = yi
+            else:
+                # ---- Predicted measurement mean
+                ybar = YSig @ Wm
+
+                # ---- Innovation covariance and cross covariance
+                Pyy = np.array(self.R, dtype=float).copy()
+                Pxy = np.zeros((n, 2), dtype=float)
+
+                for i in range(2 * n + 1):
+                    dy = (YSig[:, i] - ybar).reshape(-1, 1)
+                    dx = (Chi_pred[:, i] - X_minus).reshape(-1, 1)
+                    Pyy += Wc[i] * (dy @ dy.T)
+                    Pxy += Wc[i] * (dx @ dy.T)
+
+                # ---- Kalman gain (solve through Cholesky for numerical stability)
+                Lyy, Pyy = self._safe_cholesky(Pyy)
+                tmp = np.linalg.solve(Lyy, Pxy.T)
+                invPyy_PxyT = np.linalg.solve(Lyy.T, tmp)
+                K = invPyy_PxyT.T
+
+                # ---- Measurement update
+                prefit = Y - ybar
+                X_i = X_minus + K @ prefit
+                P_i = P_minus - Pxy @ invPyy_PxyT
+                P_i = self._symmetrize(P_i)
+                _, P_i = self._safe_cholesky(P_i)
+
+                residuals[j, :] = prefit
+
+            # ---- Save outputs
+            X_pf[j, :] = X_i
+            P_meas[j, :, :] = P_i
+            P_pf[j, :] = P_i.reshape(-1, order="F")
+            two_sigma[j, :] = 2.0 * np.sqrt(np.maximum(np.diag(P_i), 0.0))
+
+            C_post = self.G(st, X_i, t)
+            postfit_nl[j, :] = (Y - C_post) if (C_post is not None) else np.array([np.nan, np.nan], dtype=float)
+
+            if state_error is not None:
+                state_error[j, :] = X_i - Xtrue_meas[j, :]
+
+            self.Xhat = X_i.copy()
+            self.Phat = P_i.copy()
+            self.log_epoch(
+                t,
+                postfit_resid=postfit_nl[j, :],
+                Xtrue=(None if Xtrue_meas is None else Xtrue_meas[j, :]),
+            )
+
+            # ---- Advance
+            X_im1 = X_i
+            P_im1 = P_i
+
+        rms_final = self.print_rms_summary(label="UKF", first_pass_gap_s=self.first_pass_gap_s)
+
+        return {
+            "t_meas": t_meas,
+            "station_meas": st_meas,
+
+            "xhat_meas": X_pf,
+            "Xhat_meas": X_pf,
+            "X_pf": X_pf,
+
+            "prefit_resids_final": residuals,
+            "postfit_resids_linear_final": postfit_nl,
+            "postfit_resids_meas": postfit_nl,
+
+            "P_meas": P_meas,
+            "Phat_meas": P_meas,
+            "P_pf": P_pf,
+
+            "X_pred_hist": X_pred_hist,
+            "P_pred_hist": P_pred_hist,
+
+            "two_sigma_meas": two_sigma,
+            "state_error_meas": state_error,
+            "rms_final": rms_final,
             "rms_by_iter": None,
         }

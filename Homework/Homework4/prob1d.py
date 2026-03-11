@@ -93,7 +93,7 @@ def convert_smoothed_lkf_output_to_plot_result(out: dict, *, R_km: np.ndarray):
 
 def main():
     all_meas, Xtrue_meas, stations, R, P0, x0_star = load_problem2_inputs()
-    sigma_opt_m_s2 = 1.668e-6
+    sigma_opt_m_s2 = 1.668e-4
 
     mu = 398600.4415
     J2 = 0.0010826269
