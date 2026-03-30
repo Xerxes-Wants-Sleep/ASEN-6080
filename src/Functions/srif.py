@@ -11,12 +11,10 @@ from .range_rangerate import H_range_rangerate
 
 def _qr_householder_transform(A: np.ndarray, fix_sign: bool = True) -> np.ndarray:
     """
-    SRIF-style orthogonal transform:
+    SRIF orthogonal transform:
       - Triangularize only the first (p-1) columns (the 'design' block)
       - Apply the same Q^T to the entire augmented matrix so the last column
         becomes [b; e] with e being the post-fit residual(s).
-
-    This matches the MATLAB Householder(mat) behavior where n = cols-1.
     """
     A = np.asarray(A, dtype=float)
     m, p = A.shape
@@ -467,7 +465,7 @@ class SquareRootInformationFilter(KalmanFilterBase):
             "two_sigma_meas": two_sigma,
             "state_error_meas": state_error,
 
-            # SRIF process-noise bookkeeping (only meaningful if process_noise_mode != "none")
+            # SRIF process-noise bookkeeping (only meaningful if process_noise_mode not none)
             "Ru": Ru_hist,
             "Rux": Rux_hist,
             "bTildeu": bTildeu_hist,

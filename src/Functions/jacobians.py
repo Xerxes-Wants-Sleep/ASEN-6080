@@ -156,6 +156,24 @@ def da_dparams_wJ2J3(r, mu, J2, J3, Re=6378, j2=True, j3=True):
     return da_dmu, da_dJ2, da_dJ3
 
 
+def consider_cov_partial_j3(r, mu, J2, J3, Re):
+
+    """Partial of acceleration a WRT J3, for consider covariance. i.e sensitivity matrix for CC"""
+
+    x, y, z = r
+    r2 = x*x + y*y + z*z
+    rmag = np.sqrt(r2)
+    z2 = z*z
+    r4 = r2*r2
+    z4 = z2*z2
+    C = 7.0*z2 - 3.0*r2
+    D = 3.0*r4 - 30.0*r2*z2 + 35.0*z4
+    w = np.array([5.0*x*z*C, 5.0*y*z*C, D])
+    da_dJ3 = (mu*(Re**3) / (2.0*(rmag**9))) * w
+    return da_dJ3
+
+
+
 def state_builder(state9, Re=6378, j2=True, j3=True):
     """
     Build the 9x9 A-matrix for augmented state:

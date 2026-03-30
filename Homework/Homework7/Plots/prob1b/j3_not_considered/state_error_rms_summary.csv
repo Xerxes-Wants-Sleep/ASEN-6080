@@ -1,0 +1,9 @@
+case,metric,all,ignore_first_pass
+J3 not considered (P_cc0 = 0),x [m],5710.711677200193,55.27871208174735
+J3 not considered (P_cc0 = 0),y [m],1659.379946581561,139.1060142893923
+J3 not considered (P_cc0 = 0),z [m],10451.873099437864,45.297489935178554
+J3 not considered (P_cc0 = 0),vx [m/s],227.4454320409648,0.03886416979358549
+J3 not considered (P_cc0 = 0),vy [m/s],70.48219080669233,0.04766387973948942
+J3 not considered (P_cc0 = 0),vz [m/s],370.2854431437402,0.03216044483411351
+J3 not considered (P_cc0 = 0),||r||_2 [m],12025.282572729026,156.3907983716591
+J3 not considered (P_cc0 = 0),||v||_2 [m/s],440.23910910023454,0.06940146495206874
