@@ -1,0 +1,8 @@
+epoch_hr,state,inside_2sigma_pct
+0.0,mahal_2sigma_ellipsoid,94.93333333333334
+4.0,mahal_2sigma_ellipsoid,16.866666666666667
+8.0,mahal_2sigma_ellipsoid,7.166666666666667
+12.0,mahal_2sigma_ellipsoid,3.5999999999999996
+16.0,mahal_2sigma_ellipsoid,2.2666666666666666
+20.0,mahal_2sigma_ellipsoid,1.6
+24.0,mahal_2sigma_ellipsoid,1.2

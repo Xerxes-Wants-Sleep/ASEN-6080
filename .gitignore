@@ -17,4 +17,7 @@ cat > .gitignore <<'EOF'
 **/*.py[cod]
 **/.ipynb_checkpoints/
 **/.DS_Store
+
+# Homework 8 generated Monte Carlo data
+Homework/Homework8/mc_data/*.npz
 EOF
