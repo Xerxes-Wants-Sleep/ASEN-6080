@@ -3,6 +3,22 @@ from scipy.integrate import solve_ivp
 from .jacobians import stm, accel_wJ2J3
 from .range_rangerate import H_range_rangerate
 from .snc import state_noise_compensation, eci_to_ric_rotation
+from .propagation import PropSettings
+
+
+def _legacy_km_meas_to_delegate_units(all_meas):
+    """
+    Convert legacy km-key measurements to generic-filter keys without rescaling.
+    This avoids unintended x1000 conversion inside filter_18_state-style code paths.
+    """
+    out = []
+    for m in all_meas:
+        d = dict(m)
+        if ("rho_km" in d) and ("rho_dot_km_s" in d):
+            d["rho_m"] = d.pop("rho_km")
+            d["rho_dot_m_s"] = d.pop("rho_dot_km_s")
+        out.append(d)
+    return out
  
 
 
@@ -11,13 +27,22 @@ from .snc import state_noise_compensation, eci_to_ric_rotation
 class KalmanFilterBase:
     def __init__(self, x0: np.ndarray, P0: np.ndarray, R: np.ndarray, Q: np.ndarray):
         # full estimated state (for convenience)
-        self.Xhat = np.array(x0, dtype=float).copy()     # (6,)
-        self.Phat = np.array(P0, dtype=float).copy()     # (6,6)
+        self.Xhat = np.array(x0, dtype=float).reshape(-1).copy()
+        self.Phat = np.array(P0, dtype=float).copy()
         self.R = np.array(R, dtype=float).copy()         # (2,2)
-        self.Q = np.array(Q, dtype=float).copy()         # (3,3) continuous accel or (6,6) discrete
-        if self.Q.shape not in {(3, 3), (6, 6)}:
+        self.Q = np.array(Q, dtype=float).copy()
+
+        self.n = self.Xhat.size
+        if self.Phat.shape != (self.n, self.n):
+            raise ValueError(f"P0 must have shape ({self.n}, {self.n}); got {self.Phat.shape}.")
+
+        # Supported process-noise forms:
+        # - (3,3): continuous acceleration covariance (embedded in first 6 states)
+        # - (6,6): discrete covariance on [r,v] (embedded in first 6 states if n>6)
+        # - (n,n): full discrete covariance
+        if self.Q.shape not in {(3, 3), (6, 6), (self.n, self.n)}:
             raise ValueError(
-                f"Q must be shape (3,3) for SNC accel covariance or (6,6) for fixed discrete noise; got {self.Q.shape}"
+                f"Q must be (3,3), (6,6), or ({self.n},{self.n}); got {self.Q.shape}"
             )
         # Process-noise frame for 3x3 acceleration covariance:
         #   "eci" -> Q already in ECI
@@ -37,30 +62,50 @@ class KalmanFilterBase:
 
         - If self.Q is (3,3), treat it as continuous acceleration covariance and
           build Q_k with state-noise compensation.
-        - If self.Q is (6,6), treat it as already-discrete fixed Q_k.
+        - If self.Q is (6,6), treat it as already-discrete fixed Q_k on [r,v].
+        - If self.Q is (n,n), treat it as already-discrete fixed Q_k on the full state.
         """
-        if self.Q.shape == (6, 6):
+        n = int(self.Xhat.size)
+
+        if self.Q.shape == (n, n):
             return self.Q
+
+        if n < 6:
+            raise ValueError(
+                f"State dimension {n} is too small for 3x3/6x6 orbit process-noise embedding; "
+                "provide Q with full shape (n,n)."
+            )
 
         dt = max(float(delta_t), 0.0)
         if dt == 0.0:
-            return np.zeros((6, 6), dtype=float)
+            return np.zeros((n, n), dtype=float)
         
         
 
-        q_frame = str(getattr(self, "q_frame", "eci")).strip().lower()
-        if q_frame == "eci":
-            Q_accel_eci = self.Q
-        elif q_frame == "ric":
-            if r_eci is None or v_eci is None:
-                raise ValueError("RIC process noise requested but r_eci/v_eci were not provided.")
-            C_eci_to_ric = eci_to_ric_rotation(r_eci=r_eci, v_eci=v_eci)
-            C_ric_to_eci = C_eci_to_ric.T
-            Q_accel_eci = C_ric_to_eci @ self.Q @ C_ric_to_eci.T
+        if self.Q.shape == (3, 3):
+            q_frame = str(getattr(self, "q_frame", "eci")).strip().lower()
+            if q_frame == "eci":
+                Q_accel_eci = self.Q
+            elif q_frame == "ric":
+                if r_eci is None or v_eci is None:
+                    raise ValueError("RIC process noise requested but r_eci/v_eci were not provided.")
+                C_eci_to_ric = eci_to_ric_rotation(r_eci=r_eci, v_eci=v_eci)
+                C_ric_to_eci = C_eci_to_ric.T
+                Q_accel_eci = C_ric_to_eci @ self.Q @ C_ric_to_eci.T
+            else:
+                raise ValueError(f"Unsupported q_frame '{self.q_frame}'. Use 'eci' or 'ric'.")
+            Q6 = state_noise_compensation(delta_t=dt, n=6, m=3, Q=Q_accel_eci)
+        elif self.Q.shape == (6, 6):
+            Q6 = self.Q
         else:
-            raise ValueError(f"Unsupported q_frame '{self.q_frame}'. Use 'eci' or 'ric'.")
+            raise ValueError(f"Unsupported Q shape {self.Q.shape}")
 
-        return state_noise_compensation(delta_t=dt, n=6, m=3, Q=Q_accel_eci)
+        if n == 6:
+            return Q6
+
+        Qk = np.zeros((n, n), dtype=float)
+        Qk[:6, :6] = Q6
+        return Qk
 
     def log_epoch(self, t, postfit_resid, Xtrue=None):
         self.hist["t"].append(float(t))
@@ -102,11 +147,12 @@ class KalmanFilterBase:
             state_comp_all = self.rms_nan(e[keep_all, :], axis=0)
             state_comp_ign = self.rms_nan(e[keep_ignore_first, :], axis=0)
 
-            pos3_all = float(self.rms_nan(np.linalg.norm(e[keep_all, 0:3], axis=1), axis=0))
-            pos3_ign = float(self.rms_nan(np.linalg.norm(e[keep_ignore_first, 0:3], axis=1), axis=0))
+            if e.shape[1] >= 6:
+                pos3_all = float(self.rms_nan(np.linalg.norm(e[keep_all, 0:3], axis=1), axis=0))
+                pos3_ign = float(self.rms_nan(np.linalg.norm(e[keep_ignore_first, 0:3], axis=1), axis=0))
 
-            vel3_all = float(self.rms_nan(np.linalg.norm(e[keep_all, 3:6], axis=1), axis=0))
-            vel3_ign = float(self.rms_nan(np.linalg.norm(e[keep_ignore_first, 3:6], axis=1), axis=0))
+                vel3_all = float(self.rms_nan(np.linalg.norm(e[keep_all, 3:6], axis=1), axis=0))
+                vel3_ign = float(self.rms_nan(np.linalg.norm(e[keep_ignore_first, 3:6], axis=1), axis=0))
 
         return {
             "keep_all_mask": keep_all,
@@ -181,11 +227,12 @@ class KalmanFilterBase:
                 state_comp_all = rms_nan(e[keep_all, :], axis=0)
                 state_comp_ign = rms_nan(e[keep_ignore_first, :], axis=0)
 
-                pos3_all = float(rms_nan(np.linalg.norm(e[keep_all, 0:3], axis=1), axis=0))
-                pos3_ign = float(rms_nan(np.linalg.norm(e[keep_ignore_first, 0:3], axis=1), axis=0))
+                if e.shape[1] >= 6:
+                    pos3_all = float(rms_nan(np.linalg.norm(e[keep_all, 0:3], axis=1), axis=0))
+                    pos3_ign = float(rms_nan(np.linalg.norm(e[keep_ignore_first, 0:3], axis=1), axis=0))
 
-                vel3_all = float(rms_nan(np.linalg.norm(e[keep_all, 3:6], axis=1), axis=0))
-                vel3_ign = float(rms_nan(np.linalg.norm(e[keep_ignore_first, 3:6], axis=1), axis=0))
+                    vel3_all = float(rms_nan(np.linalg.norm(e[keep_all, 3:6], axis=1), axis=0))
+                    vel3_ign = float(rms_nan(np.linalg.norm(e[keep_ignore_first, 3:6], axis=1), axis=0))
 
         return {
             "keep_all_mask": keep_all,
@@ -240,7 +287,42 @@ class LinearizedKalmanFilter(KalmanFilterBase):
         j3: bool = False,
         first_pass_gap_s: float = 6 * 3600.0,
         recenter_reference: bool = False,  # keep as an option, but default False
+        dyn_fun=None,
+        dyn_jac=None,
+        station_state_map: dict | None = None,
+        station_start_index: int = 9,
+        num_stations: int = 3,
+        omega_vec: np.ndarray | None = None,
     ):
+        x0_arr = np.asarray(X0_star, dtype=float).reshape(-1)
+        n = x0_arr.size
+
+        # Generic fallback for augmented-state problems (e.g., 7-state with Cr).
+        if n != 6:
+            if dyn_fun is None or dyn_jac is None:
+                raise ValueError(
+                    "LinearizedKalmanFilter with non-6 state requires dyn_fun and dyn_jac."
+                )
+            from .filter_18_state import LinearizedKalmanFilter18State
+
+            self._delegate = LinearizedKalmanFilter18State(
+                X0_star=x0_arr,
+                P0=P0,
+                R=R,
+                Q=Q,
+                dyn_fun=dyn_fun,
+                dyn_jac=dyn_jac,
+                station_state_map=station_state_map,
+                prop_settings=PropSettings(rtol=reltol, atol=abstol, method=method),
+                station_start_index=station_start_index,
+                num_stations=num_stations,
+                omega_vec=omega_vec,
+                first_pass_gap_s=first_pass_gap_s,
+                recenter_reference=recenter_reference,
+            )
+            self.first_pass_gap_s = float(first_pass_gap_s)
+            return
+
         super().__init__(X0_star, P0, R, Q)
 
         self.X0_star = np.asarray(X0_star, dtype=float).reshape(6,).copy()
@@ -324,7 +406,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
 
     @staticmethod
     def G(station, X6: np.ndarray, t: float):
-        d = station.measure(X6[:3], X6[3:], float(t))
+        d = station.measure(X6[:3], X6[3:6], float(t))
         if d is None:
             return None
         rho = d["rho_km"] if "rho_km" in d else d["rho"]
@@ -419,6 +501,15 @@ class LinearizedKalmanFilter(KalmanFilterBase):
         run_smoother: bool = False,
         smooth_back_points: int | None = None,
     ):
+        if hasattr(self, "_delegate"):
+            if run_smoother:
+                raise ValueError("run_smoother is only available in the legacy 6-state LinearizedKalmanFilter path.")
+            all_meas_delegate = _legacy_km_meas_to_delegate_units(all_meas)
+            out = self._delegate.run(all_meas_delegate, stations=stations, Xtrue_meas=Xtrue_meas)
+            self.Xhat = np.asarray(self._delegate.Xhat, dtype=float).copy()
+            self.Phat = np.asarray(self._delegate.Phat, dtype=float).copy()
+            return out
+
         # -----------------------------
         # 0) Setup / sort
         # -----------------------------
@@ -496,7 +587,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
                 residuals[j, :] = OminusC
 
                 # Linearize measurement about reference X*
-                Htilde = H_range_rangerate(Xstar[:3], Xstar[3:], Rs, Vs)  # (2,6)
+                Htilde = H_range_rangerate(Xstar[:3], Xstar[3:6], Rs, Vs)  # (2,6)
 
                 # Kalman gain
                 S = Htilde @ Pbar @ Htilde.T + self.R
@@ -584,7 +675,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
                     continue
 
                 Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
-                Htilde = H_range_rangerate(Xstar[:3], Xstar[3:], Rs, Vs)
+                Htilde = H_range_rangerate(Xstar[:3], Xstar[3:6], Rs, Vs)
                 postfit_lin_smooth[j, :] = residuals[j, :] - (Htilde @ x_smooth_err[j, :])
 
         return {
@@ -659,7 +750,41 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         j2: bool = True,
         j3: bool = False,
         first_pass_gap_s: float = 6 * 3600.0,
+        dyn_fun=None,
+        dyn_jac=None,
+        station_state_map: dict | None = None,
+        station_start_index: int = 9,
+        num_stations: int = 3,
+        omega_vec: np.ndarray | None = None,
     ):
+        x0_arr = np.asarray(x0, dtype=float).reshape(-1)
+        n = x0_arr.size
+
+        # Generic fallback for augmented-state problems (e.g., 7-state with Cr).
+        if n != 6:
+            if dyn_fun is None or dyn_jac is None:
+                raise ValueError(
+                    "ExtendedKalmanFilter with non-6 state requires dyn_fun and dyn_jac."
+                )
+            from .filter_18_state import ExtendedKalmanFilter18State
+
+            self._delegate = ExtendedKalmanFilter18State(
+                x0=x0_arr,
+                P0=P0,
+                R=R,
+                Q=Q,
+                dyn_fun=dyn_fun,
+                dyn_jac=dyn_jac,
+                station_state_map=station_state_map,
+                prop_settings=PropSettings(rtol=reltol, atol=abstol, method=method),
+                station_start_index=station_start_index,
+                num_stations=num_stations,
+                omega_vec=omega_vec,
+                first_pass_gap_s=first_pass_gap_s,
+            )
+            self.first_pass_gap_s = float(first_pass_gap_s)
+            return
+
         super().__init__(x0, P0, R, Q)
 
         self.mu = float(mu)
@@ -708,7 +833,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
     # measurement model
     @staticmethod
     def G(station, X6: np.ndarray, t: float):
-        d = station.measure(X6[:3], X6[3:], float(t))
+        d = station.measure(X6[:3], X6[3:6], float(t))
         if d is None:
             return None
         rho = d["rho_km"] if "rho_km" in d else d["rho"]
@@ -765,6 +890,13 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         return X1_6, Phi_10
 
     def run(self, all_meas, stations, Xtrue_meas=None, t_prev_init=None):
+        if hasattr(self, "_delegate"):
+            all_meas_delegate = _legacy_km_meas_to_delegate_units(all_meas)
+            out = self._delegate.run(all_meas_delegate, stations=stations, Xtrue_meas=Xtrue_meas, t_prev_init=t_prev_init)
+            self.Xhat = np.asarray(self._delegate.Xhat, dtype=float).copy()
+            self.Phat = np.asarray(self._delegate.Phat, dtype=float).copy()
+            return out
+
         # -----------------------------
         # 0) Setup / sort / early exit
         # -----------------------------
@@ -827,7 +959,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
                 residuals[j, :] = OminusC
 
                 # ---- Linearize measurement ----
-                Htilde = H_range_rangerate(Xbar[:3], Xbar[3:], Rs, Vs)
+                Htilde = H_range_rangerate(Xbar[:3], Xbar[3:6], Rs, Vs)
 
                 # ---- Kalman gain ----
                 S = Htilde @ Pbar @ Htilde.T + self.R
@@ -901,6 +1033,20 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         num_init_meas: int = 100,
         Xtrue_meas: np.ndarray | None = None,
     ):
+        if hasattr(self, "_delegate"):
+            lkf_obj = lkf._delegate if hasattr(lkf, "_delegate") else lkf
+            all_meas_delegate = _legacy_km_meas_to_delegate_units(all_meas)
+            out = self._delegate.run_warmstarted(
+                all_meas=all_meas_delegate,
+                stations=stations,
+                lkf=lkf_obj,
+                num_init_meas=num_init_meas,
+                Xtrue_meas=Xtrue_meas,
+            )
+            self.Xhat = np.asarray(self._delegate.Xhat, dtype=float).copy()
+            self.Phat = np.asarray(self._delegate.Phat, dtype=float).copy()
+            return out
+
         """
         Warm-start EKF using LKF on the first num_init_meas observations.
 
@@ -1107,10 +1253,14 @@ class UnscentedKalmanFilter(KalmanFilterBase):
         j2: bool = True,
         j3: bool = False,
         first_pass_gap_s: float = 6 * 3600.0,
+        dyn_fun=None,
     ):
         super().__init__(X0, P0, R, Q)
 
-        self.X0 = np.asarray(X0, dtype=float).reshape(6,).copy()
+        self.X0 = np.asarray(X0, dtype=float).reshape(-1).copy()
+        self.n = self.X0.size
+        if np.asarray(P0, dtype=float).shape != (self.n, self.n):
+            raise ValueError(f"P0 must have shape ({self.n},{self.n}); got {np.asarray(P0).shape}")
 
         self.mu = float(mu)
         self.J2 = float(J2)
@@ -1119,7 +1269,7 @@ class UnscentedKalmanFilter(KalmanFilterBase):
 
         self.alpha = float(alpha)
         self.beta = float(beta)
-        self.kappa = 3.0 - 6 if kappa is None else float(kappa)
+        self.kappa = 3.0 - self.n if kappa is None else float(kappa)
 
         self.reltol = float(reltol)
         self.abstol = float(abstol)
@@ -1128,11 +1278,17 @@ class UnscentedKalmanFilter(KalmanFilterBase):
         self.j2 = bool(j2)
         self.j3 = bool(j3)
 
+        self.dyn_fun = dyn_fun
+        if (self.n != 6) and (self.dyn_fun is None):
+            raise ValueError(
+                "UnscentedKalmanFilter with non-6 state requires dyn_fun(t, x)->xdot."
+            )
+
         self.first_pass_gap_s = float(first_pass_gap_s)
 
     @staticmethod
     def G(station, X6: np.ndarray, t: float):
-        d = station.measure(X6[:3], X6[3:], float(t))
+        d = station.measure(X6[:3], X6[3:6], float(t))
         if d is None:
             return None
         rho = d["rho_km"] if "rho_km" in d else d["rho"]
@@ -1189,18 +1345,23 @@ class UnscentedKalmanFilter(KalmanFilterBase):
         def dyn(tt, x_flat):
             X = x_flat.reshape(n, nsig, order="F")
             dX = np.zeros_like(X)
-            dX[0:3, :] = X[3:6, :]
-
-            for k in range(nsig):
-                r = X[0:3, k]
-                a = accel_wJ2J3(
-                    r,
-                    mu=self.mu,
-                    J2=self.J2 if self.j2 else 0.0,
-                    J3=self.J3 if self.j3 else 0.0,
-                    Re=self.Re,
-                )
-                dX[3:6, k] = a
+            if self.dyn_fun is None:
+                # Fast default path: 6-state gravity/J2/J3 model.
+                dX[0:3, :] = X[3:6, :]
+                for k in range(nsig):
+                    r = X[0:3, k]
+                    a = accel_wJ2J3(
+                        r,
+                        mu=self.mu,
+                        J2=self.J2 if self.j2 else 0.0,
+                        J3=self.J3 if self.j3 else 0.0,
+                        Re=self.Re,
+                    )
+                    dX[3:6, k] = a
+            else:
+                # Generic path for augmented states (e.g., 7-state [r,v,Cr]).
+                for k in range(nsig):
+                    dX[:, k] = np.asarray(self.dyn_fun(tt, X[:, k]), dtype=float).reshape(n)
 
             return dX.reshape(-1, order="F")
 
@@ -1235,13 +1396,13 @@ class UnscentedKalmanFilter(KalmanFilterBase):
 
         if Xtrue_meas is not None:
             Xtrue_meas = np.asarray(Xtrue_meas, dtype=float)
-            if Xtrue_meas.shape != (N, 6):
-                raise ValueError(f"Xtrue_meas must have shape ({N}, 6).")
+            if Xtrue_meas.shape != (N, self.n):
+                raise ValueError(f"Xtrue_meas must have shape ({N}, {self.n}).")
 
         # -----------------------------
         # 1) UKF constants
         # -----------------------------
-        n = 6
+        n = self.n
         lam = self.alpha**2 * (n + self.kappa) - n
         gamma = np.sqrt(n + lam)
 
@@ -1257,15 +1418,15 @@ class UnscentedKalmanFilter(KalmanFilterBase):
         residuals = np.full((N, 2), np.nan, dtype=float)
         postfit_nl = np.full((N, 2), np.nan, dtype=float)
 
-        X_pf = np.full((N, 6), np.nan, dtype=float)
-        P_meas = np.full((N, 6, 6), np.nan, dtype=float)
-        P_pf = np.full((N, 36), np.nan, dtype=float)
-        two_sigma = np.full((N, 6), np.nan, dtype=float)
+        X_pf = np.full((N, n), np.nan, dtype=float)
+        P_meas = np.full((N, n, n), np.nan, dtype=float)
+        P_pf = np.full((N, n * n), np.nan, dtype=float)
+        two_sigma = np.full((N, n), np.nan, dtype=float)
 
-        X_pred_hist = np.full((N, 6), np.nan, dtype=float)
-        P_pred_hist = np.full((N, 6, 6), np.nan, dtype=float)
+        X_pred_hist = np.full((N, n), np.nan, dtype=float)
+        P_pred_hist = np.full((N, n, n), np.nan, dtype=float)
 
-        state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
+        state_error = None if Xtrue_meas is None else np.full((N, n), np.nan, dtype=float)
 
         # -----------------------------
         # 3) Initialize filter

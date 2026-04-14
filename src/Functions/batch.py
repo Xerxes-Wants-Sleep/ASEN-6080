@@ -57,7 +57,7 @@ def propagate_state_and_stm_history(
 
 
 def predict_meas_vec(station, x_i_6, ti):
-    d = station.measure(x_i_6[:3], x_i_6[3:], float(ti))
+    d = station.measure(x_i_6[:3], x_i_6[3:6], float(ti))
     return np.array([d["rho_km"], d["rho_dot_km_s"]], dtype=float)
 
 
@@ -76,6 +76,10 @@ def batch_estimate_x0(
     tol: float = 1e-10,
     reltol: float = 1e-10,
     abstol: float = 1e-10,
+    method: str = "DOP853",
+    dyn_fun=None,
+    dyn_jac=None,
+    prop_settings: PropSettings | None = None,
 ):
     # -----------------------------
     # 0) Setup / bookkeeping
@@ -88,7 +92,45 @@ def batch_estimate_x0(
     mcount = len(all_meas)
     t0 = float(t_meas[0])
 
-    x0_bar = np.asarray(x0_bar, dtype=float).reshape(6,)
+    x0_bar = np.asarray(x0_bar, dtype=float).reshape(-1)
+    n = x0_bar.size
+
+    # Generic n-state fallback (e.g., 7-state [r,v,Cr]) uses the newer batch path.
+    if n != 6:
+        if dyn_fun is None or dyn_jac is None:
+            raise ValueError(
+                "For non-6-state batch runs, provide dyn_fun and dyn_jac. "
+                "These should match the state dimension of x0_bar."
+            )
+        from .batch_18_state import batch_estimate_x0 as batch_estimate_x0_generic
+
+        # Keep legacy km-unit behavior when routing through generic batch path.
+        all_meas_generic = []
+        for m in all_meas:
+            d = dict(m)
+            if ("rho_km" in d) and ("rho_dot_km_s" in d):
+                d["rho_m"] = d.pop("rho_km")
+                d["rho_dot_m_s"] = d.pop("rho_dot_km_s")
+            all_meas_generic.append(d)
+
+        settings = prop_settings
+        if settings is None:
+            settings = PropSettings(rtol=reltol, atol=abstol, method=method)
+
+        return batch_estimate_x0_generic(
+            all_meas=all_meas_generic,
+            stations=stations,
+            x0_bar=x0_bar,
+            P0=P0,
+            R=R,
+            dyn_fun=dyn_fun,
+            dyn_jac=dyn_jac,
+            max_iter=max_iter,
+            tol=tol,
+            prop_settings=settings,
+        )
+
+    x0_bar = x0_bar.reshape(6,)
     x0_star = x0_bar.copy()
 
     # Use these as-is for now (later we can swap to Cholesky solves)
@@ -120,6 +162,7 @@ def batch_estimate_x0(
             Re=Re,
             reltol=reltol,
             abstol=abstol,
+            method=method,
         )
 
         # 1c) Allocate aligned residual/Jacobian storage
@@ -134,7 +177,7 @@ def batch_estimate_x0(
             x_i = X_hist[j, :]
             Phi_i0 = Phi_hist[j, :, :]
 
-            d = st.measure(x_i[:3], x_i[3:], ti)
+            d = st.measure(x_i[:3], x_i[3:6], ti)
             if d is None:
                 continue
 

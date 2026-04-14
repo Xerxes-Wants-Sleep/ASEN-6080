@@ -7,6 +7,7 @@ from scipy.integrate import solve_ivp
 from .filters import KalmanFilterBase
 from .jacobians import stm
 from .range_rangerate import H_range_rangerate
+from .propagation import propagate_x_phi_history, PropSettings
 
 
 def _qr_householder_transform(A: np.ndarray, fix_sign: bool = True) -> np.ndarray:
@@ -110,10 +111,13 @@ class SquareRootInformationFilter(KalmanFilterBase):
         process_noise_mode: str = "none",  # "none" | "additive" | "accel"
         uBar: np.ndarray | None = None,    # mean noise (q,)
         max_process_dt_s: float = 10.0,    # mimic your class code gating if you want
+        dyn_fun=None,
+        dyn_jac=None,
     ):
         super().__init__(X0_star, P0, R, Q)
 
-        self.X0_star = np.asarray(X0_star, dtype=float).reshape(6,).copy()
+        self.X0_star = np.asarray(X0_star, dtype=float).reshape(-1).copy()
+        self.n = self.X0_star.size
         self.mu = float(mu)
         self.J2 = float(J2)
         self.J3 = float(J3)
@@ -130,55 +134,70 @@ class SquareRootInformationFilter(KalmanFilterBase):
         self.uBar = None if uBar is None else np.asarray(uBar, dtype=float).reshape(-1)
         self.max_process_dt_s = float(max_process_dt_s)
 
+        self.dyn_fun = dyn_fun
+        self.dyn_jac = dyn_jac
+        if (self.n != 6) and (self.dyn_fun is None or self.dyn_jac is None):
+            raise ValueError("SRIF with non-6 state requires dyn_fun and dyn_jac.")
+
     # ---------- Reference + STM propagation ----------
     def propagate_state_and_stm_history(self, t_eval: np.ndarray):
         t_eval = np.asarray(t_eval, dtype=float).reshape(-1)
-        t0 = float(t_eval[0])
-        tf = float(t_eval[-1])
+        if self.n == 6 and self.dyn_fun is None:
+            t0 = float(t_eval[0])
+            tf = float(t_eval[-1])
 
-        nx = 6
-        remove = np.array([6, 7, 8], dtype=int)
+            nx = 6
+            remove = np.array([6, 7, 8], dtype=int)
 
-        X0_9 = np.hstack((self.X0_star, self.mu, self.J2, self.J3))
-        Phi0 = np.eye(nx)
-        y0 = np.hstack((X0_9, Phi0.reshape(-1)))
+            X0_9 = np.hstack((self.X0_star, self.mu, self.J2, self.J3))
+            Phi0 = np.eye(nx)
+            y0 = np.hstack((X0_9, Phi0.reshape(-1)))
 
-        def fun(t, y):
-            return stm(
-                t,
-                state9=y[:9],
-                phi=y[9:].reshape(nx, nx),
-                rows_col_to_remove=remove,
-                Re=self.Re,
-                j2=self.j2,
-                j3=self.j3,
+            def fun(t, y):
+                return stm(
+                    t,
+                    state9=y[:9],
+                    phi=y[9:].reshape(nx, nx),
+                    rows_col_to_remove=remove,
+                    Re=self.Re,
+                    j2=self.j2,
+                    j3=self.j3,
+                )
+
+            sol = solve_ivp(
+                fun,
+                (t0, tf),
+                y0,
+                t_eval=t_eval,
+                rtol=self.reltol,
+                atol=self.abstol,
+                method=self.method,
             )
+            if not sol.success:
+                raise RuntimeError(f"STM integration failed: {sol.message}")
 
-        sol = solve_ivp(
-            fun,
-            (t0, tf),
-            y0,
+            Y = sol.y.T
+            Xstar_hist = Y[:, :6]
+            Phi_i0_hist = Y[:, 9:].reshape(-1, nx, nx)  # Phi(t_i, t0)
+            return Xstar_hist, Phi_i0_hist
+
+        Xstar_hist, Phi_i0_hist = propagate_x_phi_history(
+            x0=self.X0_star,
             t_eval=t_eval,
-            rtol=self.reltol,
-            atol=self.abstol,
-            method=self.method,
+            f=self.dyn_fun,
+            A=self.dyn_jac,
+            settings=PropSettings(rtol=self.reltol, atol=self.abstol, method=self.method),
         )
-        if not sol.success:
-            raise RuntimeError(f"STM integration failed: {sol.message}")
-
-        Y = sol.y.T
-        Xstar_hist = Y[:, :6]
-        Phi_i0_hist = Y[:, 9:].reshape(-1, nx, nx)  # Phi(t_i, t0)
         return Xstar_hist, Phi_i0_hist
 
     @staticmethod
     def phi_i0_to_phi_step(Phi_i0_hist: np.ndarray):
         Phi_i0_hist = np.asarray(Phi_i0_hist, dtype=float)
-        N = Phi_i0_hist.shape[0]
+        N, n, _ = Phi_i0_hist.shape
         Phi_step = np.zeros_like(Phi_i0_hist)
-        Phi_step[0] = np.eye(6)
+        Phi_step[0] = np.eye(n)
 
-        I = np.eye(6)
+        I = np.eye(n)
         for i in range(1, N):
             Phi_step[i] = Phi_i0_hist[i] @ np.linalg.solve(Phi_i0_hist[i - 1], I)
 
@@ -186,7 +205,7 @@ class SquareRootInformationFilter(KalmanFilterBase):
 
     @staticmethod
     def G(station, X6: np.ndarray, t: float):
-        d = station.measure(X6[:3], X6[3:], float(t))
+        d = station.measure(X6[:3], X6[3:6], float(t))
         if d is None:
             return None
         rho = d["rho_km"] if "rho_km" in d else d["rho"]
@@ -194,10 +213,15 @@ class SquareRootInformationFilter(KalmanFilterBase):
         return np.array([rho, rhod], dtype=float)
 
     @staticmethod
-    def _gamma_accel(dt: float) -> np.ndarray:
-        """Gamma(dt) for integrated accel noise into [r; v] 6-state."""
+    def _gamma_accel(dt: float, n: int = 6) -> np.ndarray:
+        """Gamma(dt) for integrated accel noise into [r; v] embedded in n-state."""
         dt = float(dt)
-        return np.vstack([(0.5 * dt * dt) * np.eye(3), dt * np.eye(3)])  # (6,3)
+        gamma6 = np.vstack([(0.5 * dt * dt) * np.eye(3), dt * np.eye(3)])  # (6,3)
+        if n == 6:
+            return gamma6
+        gamma = np.zeros((n, 3), dtype=float)
+        gamma[:6, :] = gamma6
+        return gamma
 
     # ---------- SRIF run ----------
     def run(self, all_meas, stations, Xtrue_meas: np.ndarray | None = None):
@@ -206,11 +230,12 @@ class SquareRootInformationFilter(KalmanFilterBase):
         t_meas = np.array([float(m["t"]) for m in all_meas], dtype=float)
         st_meas = [m["station"] for m in all_meas]
         N = len(all_meas)
+        n = self.n
 
         if Xtrue_meas is not None:
             Xtrue_meas = np.asarray(Xtrue_meas, dtype=float)
-            if Xtrue_meas.shape != (N, 6):
-                raise ValueError(f"Xtrue_meas must have shape ({N}, 6) aligned with sorted measurement order.")
+            if Xtrue_meas.shape != (N, n):
+                raise ValueError(f"Xtrue_meas must have shape ({N}, {n}) aligned with sorted measurement order.")
 
         # 1) Precompute reference + Phi steps (same as your LKF)
         Xstar_hist, Phi_i0_hist = self.propagate_state_and_stm_history(t_meas)
@@ -223,24 +248,23 @@ class SquareRootInformationFilter(KalmanFilterBase):
         residuals = np.full((N, 2), np.nan, dtype=float)          # prefit (unwhitened): O - C_ref
         postfit_lin = np.full((N, 2), np.nan, dtype=float)        # linear postfit (unwhitened): V*e
         postfit_nl = np.full((N, 2), np.nan, dtype=float)         # placeholder for plotting compatibility
-        X_pf = np.full((N, 6), np.nan, dtype=float)
-        P_meas = np.full((N, 6, 6), np.nan, dtype=float)
-        P_pf = np.full((N, 36), np.nan, dtype=float)
-        two_sigma = np.full((N, 6), np.nan, dtype=float)
-        state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
+        X_pf = np.full((N, n), np.nan, dtype=float)
+        P_meas = np.full((N, n, n), np.nan, dtype=float)
+        P_pf = np.full((N, n * n), np.nan, dtype=float)
+        two_sigma = np.full((N, n), np.nan, dtype=float)
+        state_error = None if Xtrue_meas is None else np.full((N, n), np.nan, dtype=float)
 
         prefit_whitened = np.full((N, 2), np.nan, dtype=float)
         postfit_whitened = np.full((N, 2), np.nan, dtype=float)
 
-        P_pred_hist = np.full((N, 6, 6), np.nan, dtype=float)
-        x_pred_hist = np.full((N, 6), np.nan, dtype=float)
+        P_pred_hist = np.full((N, n, n), np.nan, dtype=float)
+        x_pred_hist = np.full((N, n), np.nan, dtype=float)
 
         # SRIF smoothing bookkeeping (optional)
         Ru_hist, Rux_hist, bTildeu_hist, uHat_hist = [], [], [], []
 
         # 4) Initialize SRIF prior: R0^T R0 = P0^{-1}, b0 = R0 x0
-        n = 6
-        x_hat = np.zeros(6, dtype=float)  # error-state estimate (same as LKF initial)
+        x_hat = np.zeros(n, dtype=float)  # error-state estimate (same as LKF initial)
         R_info = _info_factor_from_cov(self.P0)  # (6,6) upper
         b_info = R_info @ x_hat                 # (6,)
 
@@ -295,7 +319,7 @@ class SquareRootInformationFilter(KalmanFilterBase):
                     if Qacc.shape != (3, 3):
                         raise ValueError(f"SRIF accel noise expects Q as (3,3), got {Qacc.shape}")
                     q = 3
-                    Gamma = self._gamma_accel(dt)  # (6,3)
+                    Gamma = self._gamma_accel(dt, n=n)  # (n,3)
                     Ru = _info_factor_from_cov(Qacc)
                     if bu_prev is None:
                         bu_prev = Ru @ self.uBar
@@ -381,9 +405,11 @@ class SquareRootInformationFilter(KalmanFilterBase):
             prefit_whitened[k, :] = y
 
             Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
-            H = H_range_rangerate(Xstar[:3], Xstar[3:], Rs, Vs)  # (2,6)
+            H_sc = H_range_rangerate(Xstar[:3], Xstar[3:6], Rs, Vs)  # (2,6)
+            H = np.zeros((2, n), dtype=float)
+            H[:, :6] = H_sc
 
-            Htilde = la.solve_triangular(V, H, lower=True, check_finite=False)  # (2,6)
+            Htilde = la.solve_triangular(V, H, lower=True, check_finite=False)  # (2,n)
 
             # Stack and QR (Householder) measurement update:
             # [ Rtilde  btilde ]

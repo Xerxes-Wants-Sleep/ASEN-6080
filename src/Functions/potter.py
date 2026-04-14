@@ -199,8 +199,10 @@ class PotterLKF18State(KalmanFilterBase):
             Phi = Phi_step[j, :, :]
 
             # ---- Time Update (error-state) ----
+            dt = 0.0 if j == 0 else (t - float(t_meas[j - 1]))
+            Qk = self.build_process_noise(dt, r_eci=Xstar[:3], v_eci=Xstar[3:6])
             xbar = Phi @ x_hat
-            Pbar = Phi @ P @ Phi.T + self.Q
+            Pbar = Phi @ P @ Phi.T + Qk
 
             # predicted measurement at reference
             if self.station_state_map is not None:
@@ -226,7 +228,7 @@ class PotterLKF18State(KalmanFilterBase):
                     )
                 else:
                     r_gs, v_gs = st_rep.station_eci(t)
-                    H_sc = H_range_rangerate(Xstar[:3], Xstar[3:], r_gs, v_gs)
+                    H_sc = H_range_rangerate(Xstar[:3], Xstar[3:6], r_gs, v_gs)
                     Htilde = np.zeros((2, self.n), dtype=float)
                     Htilde[:, :6] = H_sc
 
