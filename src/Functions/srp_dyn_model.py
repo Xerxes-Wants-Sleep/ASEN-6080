@@ -96,10 +96,39 @@ def mu_sun_srp_stm_deriv(
     sun_state_func,
 ):
     """
-    Combined state + STM derivative for ODE solver
+    Combined state + STM derivative for ODE integration.
 
-    XPhi = [X; Phi_flat]
-    with X length 7 and Phi 7x7.
+    Parameters
+    ----------
+    t : float
+        Current integration time [s].
+    XPhi : ndarray, shape (56,)
+        Stacked vector ``[X; Phi_flat]`` where:
+          - ``X`` is the 7-state ``[x, y, z, xdot, ydot, zdot, Cr]``
+          - ``Phi_flat`` is the flattened 7x7 STM.
+    pConst : object
+        Constants container with attributes:
+          - ``mu_earth`` : Earth gravitational parameter
+          - ``mu_sun``   : Sun gravitational parameter
+        Units must be consistent with the state/ephemeris units.
+    scConst : object
+        Spacecraft/SRP constants container with attributes:
+          - ``area`` : effective SRP area
+          - ``mass`` : spacecraft mass
+          - ``solar_flux_1au`` : solar flux at 1 AU
+          - ``c`` : speed of light
+          - ``AU_m`` : astronomical unit in meters
+    earth_state_func : callable
+        Function handle ``earth_state_func(t) -> (r_earth, v_earth)``.
+        Must return Earth position/velocity in the same frame and units as ``X``.
+    sun_state_func : callable
+        Function handle ``sun_state_func(t) -> (r_sun, v_sun)``.
+        Must return Sun position/velocity in the same frame and units as ``X``.
+
+    Returns
+    -------
+    ndarray, shape (56,)
+        Stacked derivative ``[dX/dt; d(Phi_flat)/dt]``.
     """
     XPhi = np.asarray(XPhi, dtype=float).reshape(-1)
 

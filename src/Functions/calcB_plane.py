@@ -42,9 +42,8 @@ def calc_bplane(
     What = h_vec / h
 
     a = -mu / (v_mag**2 - 2.0 * mu / r_mag)
-    b = abs(a) * np.sqrt(e**2 - 1.0)
-
     Shat = v_vec / v_mag
+    v_inf_hat = Shat
 
     Nhat = np.array([0.0, 0.0, 1.0])
     That = np.cross(Shat, Nhat)
@@ -53,7 +52,7 @@ def calc_bplane(
 
     Rhat = np.cross(Shat, That)
 
-    B_vec = b * np.cross(Shat, What)
+    B_vec = r_vec - np.dot(r_vec, v_inf_hat) * v_inf_hat
 
     # DCM from STR to ECI
     STR2ECI = np.column_stack((Shat, That, Rhat))
@@ -85,6 +84,7 @@ def calc_bplane(
         y0=XPhi0,
         rtol=rtol,
         atol=atol,
+        method="RK45",
     )
     
     t_BPlane = sol.t

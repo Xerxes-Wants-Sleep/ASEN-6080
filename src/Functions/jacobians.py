@@ -1,6 +1,5 @@
 import numpy as np
 from .atmosphere import rho_exp, grad_rho_exp  # For drag stuff
-from .srp_dyn_model import srp_dyn
 
 def skew(w: np.ndarray) -> np.ndarray:
     """Return the 3x3 skew-symmetric matrix such that skew(w) @ v == w x v."""
@@ -434,9 +433,9 @@ def cannonball_SRP(
     Inputs
     ------
     r_sc : (3,) ndarray
-        Spacecraft position in m.
+        Spacecraft position in km.
     r_sun : (3,) ndarray
-        Sun position in m, in the same frame as r_sc.
+        Sun position in km, in the same frame as r_sc.
     Cr : float
         SRP reflectivity coefficient.
     area : float
@@ -454,17 +453,21 @@ def cannonball_SRP(
     Returns
     -------
     a_srp : (3,) ndarray
-        SRP acceleration in m/s^2.
+        SRP acceleration in km/s^2.
     dadr_sc : (3,3) ndarray
         Partial of a_srp with respect to spacecraft position r_sc, units 1/s^2.
     dadCr : (3,) ndarray
-        Partial of a_srp with respect to Cr.
+        Partial of a_srp with respect to Cr, in km/s^2.
     """
     r_sc = np.asarray(r_sc, dtype=float).reshape(3)
     r_sun = np.asarray(r_sun, dtype=float).reshape(3)
 
+    # Interface is km-based; convert to SI internally for SRP physics.
+    r_sc_m = r_sc * 1.0e3
+    r_sun_m = r_sun * 1.0e3
+
     # Vector from spacecraft to Sun
-    s = r_sun - r_sc
+    s = r_sun_m - r_sc_m
     R = float(np.linalg.norm(s))
     I = np.eye(3)
     P0 = solar_flux_1au / c
@@ -475,13 +478,17 @@ def cannonball_SRP(
     Q = accel_scale_1au * (AU_m ** 2)                 # m^3/s^2
 
     # Acceleration
-    a_srp = -Q * s / (R ** 3)
+    a_srp_m = -Q * s / (R ** 3)
 
     # Partial wrt spacecraft position
     dadr_sc = Q * (I / (R ** 3) - 3.0 * np.outer(s, s) / (R ** 5))
 
     # Partial wrt Cr
-    dadCr = -(solar_flux_1au / c) * (area / mass) * (AU_m ** 2) * s / (R ** 3)
+    dadCr_m = -(solar_flux_1au / c) * (area / mass) * (AU_m ** 2) * s / (R ** 3)
+
+    # Convert acceleration outputs to km/s^2.
+    a_srp = 1.0e-3 * a_srp_m
+    dadCr = 1.0e-3 * dadCr_m
 
     return a_srp, dadr_sc, dadCr
 
@@ -514,18 +521,18 @@ def third_body_accel_partials(
     Inputs
     ------
     r_sc : (3,) ndarray
-        Spacecraft position in m, in an inertial frame.
+        Spacecraft position in km, in an inertial frame.
     r_earth : (3,) ndarray
-        Earth position in m, in the same inertial frame.
+        Earth position in km, in the same inertial frame.
     r_sun : (3,) ndarray
-        Sun position in m, in the same inertial frame.
+        Sun position in km, in the same inertial frame.
     mu_i : float
-        Gravitational parameter of the third body (Sun) in m^3/s^2.
+        Gravitational parameter of the third body (Sun) in km^3/s^2.
 
     Returns
     -------
     a_i : (3,) ndarray
-        Third-body perturbation acceleration in m/s^2.
+        Third-body perturbation acceleration in km/s^2.
     dadr_sc : (3,3) ndarray
         Partial of a_i wrt spacecraft position r_sc, units 1/s^2.
     """
@@ -547,7 +554,7 @@ def third_body_accel_partials(
     a_i = mu_i * (d / rho**3 - D / R**3)
 
     # Partial wrt spacecraft position only
-    dadr_sc = mu_i * (I / rho**3 - 3.0 * np.outer(d, d) / rho**5)
+    dadr_sc = -mu_i * (I / rho**3 - 3.0 * np.outer(d, d) / rho**5)
 
     return a_i, dadr_sc
 
@@ -569,7 +576,7 @@ def srp_thirdbody_variational_eq(r_sc: np.ndarray,
     Returns
     -------
     a_total : (3,) ndarray
-        Total perturbation acceleration (SRP + third-body) in m/s^2.
+        Total perturbation acceleration (SRP + third-body) in km/s^2.
     dadr_sc : (3,3) ndarray
         Partial of total acceleration wrt spacecraft position r_sc, units 1/s^2.
     dadCr : (3,) ndarray

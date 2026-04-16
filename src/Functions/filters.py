@@ -1,4 +1,5 @@
 import numpy as np
+import time
 from scipy.integrate import solve_ivp
 from .jacobians import stm, accel_wJ2J3
 from .range_rangerate import H_range_rangerate
@@ -500,6 +501,8 @@ class LinearizedKalmanFilter(KalmanFilterBase):
         Xtrue_meas: np.ndarray | None = None,
         run_smoother: bool = False,
         smooth_back_points: int | None = None,
+        show_progress: bool = False,
+        progress_every: int = 50,
     ):
         if hasattr(self, "_delegate"):
             if run_smoother:
@@ -555,6 +558,8 @@ class LinearizedKalmanFilter(KalmanFilterBase):
         # -----------------------------
         x_hat = np.zeros(6, dtype=float)                    # error-state estimate
         P = np.array(self.P0, dtype=float).copy()           # error-state covariance
+        t_start_wall = time.perf_counter()
+        prog_step = max(int(progress_every), 1)
 
         # -----------------------------
         # 4) Main filter loop
@@ -628,6 +633,21 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             self.Xhat = X_post
             self.log_epoch(t, postfit_resid=postfit_nl[j, :],
                         Xtrue=(None if Xtrue_meas is None else Xtrue_meas[j, :]))
+
+            if show_progress:
+                k = j + 1
+                if (k == N) or (k % prog_step == 0):
+                    elapsed = max(time.perf_counter() - t_start_wall, 1e-9)
+                    rate = k / elapsed
+                    eta = (N - k) / rate if rate > 0.0 else float("inf")
+                    bar_len = 28
+                    n_fill = int(round(bar_len * k / max(N, 1)))
+                    bar = "#" * n_fill + "-" * (bar_len - n_fill)
+                    msg = (
+                        f"\rLKF Progress [{bar}] {k}/{N} ({100.0 * k / max(N, 1):5.1f}%) "
+                        f"Elapsed {elapsed/60.0:6.2f} min  ETA {eta/60.0:6.2f} min"
+                    )
+                    print(msg, end=("\n" if k == N else ""), flush=True)
 
         # sync final state back to object
         self.xhat = x_hat
@@ -889,7 +909,15 @@ class ExtendedKalmanFilter(KalmanFilterBase):
 
         return X1_6, Phi_10
 
-    def run(self, all_meas, stations, Xtrue_meas=None, t_prev_init=None):
+    def run(
+        self,
+        all_meas,
+        stations,
+        Xtrue_meas=None,
+        t_prev_init=None,
+        show_progress: bool = False,
+        progress_every: int = 50,
+    ):
         if hasattr(self, "_delegate"):
             all_meas_delegate = _legacy_km_meas_to_delegate_units(all_meas)
             out = self._delegate.run(all_meas_delegate, stations=stations, Xtrue_meas=Xtrue_meas, t_prev_init=t_prev_init)
@@ -933,6 +961,8 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         P = np.asarray(self.Phat, dtype=float).reshape(6, 6)
 
         prev_time = float(t_meas[0]) if t_prev_init is None else float(t_prev_init)
+        t_start_wall = time.perf_counter()
+        prog_step = max(int(progress_every), 1)
 
         # -----------------------------
         # 3) Main filter loop
@@ -999,6 +1029,21 @@ class ExtendedKalmanFilter(KalmanFilterBase):
             self.Xhat = X_hat
             self.log_epoch(t, postfit_resid=postfit_nl[j, :],
                         Xtrue=(None if Xtrue_meas is None else Xtrue_meas[j, :]))
+
+            if show_progress:
+                k = j + 1
+                if (k == N) or (k % prog_step == 0):
+                    elapsed = max(time.perf_counter() - t_start_wall, 1e-9)
+                    rate = k / elapsed
+                    eta = (N - k) / rate if rate > 0.0 else float("inf")
+                    bar_len = 28
+                    n_fill = int(round(bar_len * k / max(N, 1)))
+                    bar = "#" * n_fill + "-" * (bar_len - n_fill)
+                    msg = (
+                        f"\rEKF Progress [{bar}] {k}/{N} ({100.0 * k / max(N, 1):5.1f}%) "
+                        f"Elapsed {elapsed/60.0:6.2f} min  ETA {eta/60.0:6.2f} min"
+                    )
+                    print(msg, end=("\n" if k == N else ""), flush=True)
 
         # sync state back
         self.Xhat = X_hat
@@ -1244,7 +1289,7 @@ class UnscentedKalmanFilter(KalmanFilterBase):
         J2: float,
         J3: float,
         Re: float = 6378.0,
-        alpha: float = 1e-3,
+        alpha: float = 1,
         beta: float = 2.0,
         kappa: float | None = None,
         reltol: float = 1e-10,
@@ -1383,6 +1428,8 @@ class UnscentedKalmanFilter(KalmanFilterBase):
         all_meas,
         stations,
         Xtrue_meas: np.ndarray | None = None,
+        show_progress: bool = False,
+        progress_every: int = 50,
     ):
         # -----------------------------
         # 0) Setup / sort
@@ -1433,6 +1480,8 @@ class UnscentedKalmanFilter(KalmanFilterBase):
         # -----------------------------
         X_im1 = self.X0.copy()
         P_im1 = np.asarray(self.P0, dtype=float).copy()
+        t_start_wall = time.perf_counter()
+        prog_step = max(int(progress_every), 1)
 
         # -----------------------------
         # 4) Main filter loop
@@ -1548,6 +1597,21 @@ class UnscentedKalmanFilter(KalmanFilterBase):
             # ---- Advance
             X_im1 = X_i
             P_im1 = P_i
+
+            if show_progress:
+                k = j + 1
+                if (k == N) or (k % prog_step == 0):
+                    elapsed = max(time.perf_counter() - t_start_wall, 1e-9)
+                    rate = k / elapsed
+                    eta = (N - k) / rate if rate > 0.0 else float("inf")
+                    bar_len = 28
+                    n_fill = int(round(bar_len * k / max(N, 1)))
+                    bar = "#" * n_fill + "-" * (bar_len - n_fill)
+                    msg = (
+                        f"\rUKF Progress [{bar}] {k}/{N} ({100.0 * k / max(N, 1):5.1f}%) "
+                        f"Elapsed {elapsed/60.0:6.2f} min  ETA {eta/60.0:6.2f} min"
+                    )
+                    print(msg, end=("\n" if k == N else ""), flush=True)
 
         rms_final = self.print_rms_summary(label="UKF", first_pass_gap_s=self.first_pass_gap_s)
 
