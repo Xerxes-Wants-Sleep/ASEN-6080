@@ -444,6 +444,125 @@ def make_cr_3sigma_plot(out: dict, outdir: Path):
     fig.savefig(outdir / "cr_estimate_3sigma_envelope.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
+
+def propagate_snapshot_to_3soi_with_stm(
+    *,
+    x_arc: np.ndarray,
+    P_arc: np.ndarray,
+    t_arc: float,
+    t_search_days: float = 400.0,
+):
+    """
+    Propagate a 7-state estimate/covariance from arc-time to 3*RSOI crossing.
+    Returns (t_3soi, x_3soi, P_3soi).
+    """
+    y0 = np.hstack((np.asarray(x_arc, dtype=float).reshape(7), np.eye(7).reshape(-1)))
+
+    soi_event = lambda tau, y: SOIcheck(tau, y[:7])
+    soi_event.terminal = True
+    soi_event.direction = -1.0
+
+    sol = solve_ivp(
+        fun=lambda tau, y: mu_sun_srp_stm_deriv(
+            t=tau,
+            XPhi=y,
+            pConst=pConst,
+            scConst=scConst,
+            earth_state_func=earth_state_func,
+            sun_state_func=sun_state_func,
+        ),
+        t_span=(float(t_arc), float(t_arc) + float(t_search_days) * 86400.0),
+        y0=y0,
+        events=soi_event,
+        rtol=1.0e-9,
+        atol=1.0e-9,
+        method="RK45",
+        max_step=3600.0,
+    )
+
+    if (not sol.success) or (len(sol.t_events[0]) == 0):
+        raise RuntimeError(f"3*RSOI crossing not found from arc at t={t_arc:.3f} s.")
+
+    t_3soi = float(sol.t_events[0][0])
+    y_3soi = np.asarray(sol.y_events[0][0], dtype=float)
+    x_3soi = y_3soi[:7]
+    Phi_arc_to_3soi = y_3soi[7:].reshape(7, 7)
+    P_3soi = Phi_arc_to_3soi @ np.asarray(P_arc, dtype=float) @ Phi_arc_to_3soi.T
+
+    return t_3soi, x_3soi, P_3soi
+
+
+def _ellipse_points_from_cov(cov2: np.ndarray, n_sigma: float = 3.0, n_pts: int = 500):
+    cov = np.asarray(cov2, dtype=float).reshape(2, 2)
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.maximum(vals, 0.0)
+    radii = float(n_sigma) * np.sqrt(vals)
+
+    th = np.linspace(0.0, 2.0 * np.pi, int(n_pts))
+    circ = np.vstack((np.cos(th), np.sin(th)))
+    xy = vecs @ np.diag(radii) @ circ
+    return xy[0, :], xy[1, :]
+
+
+def make_bplane_arc_overlay_plot(records: list[dict], outdir: Path):
+    """
+    Plot B-plane estimate and 3-sigma covariance ellipse for each arc.
+    Axis convention matches assignment-style figure: x=T, y=R.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    colors = ["r", "g", "b", "k"]
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("T [km]")
+    ax.set_ylabel("R [km]")
+    ax.set_title("B-Plane Target Estimate and 3 Sigma Uncertainty by Arc Length")
+
+    for i, rec in enumerate(records):
+        col = colors[i % len(colors)]
+        cov_tr = np.asarray(rec["cov_tr"], dtype=float)
+        ex, ey = _ellipse_points_from_cov(cov_tr, n_sigma=3.0, n_pts=500)  # x=T, y=R
+
+        Bt = float(rec["BdotT_km"])
+        Br = float(rec["BdotR_km"])
+        day = float(rec["day_selected"])
+
+        ax.plot(
+            Bt + ex,
+            Br + ey,
+            "-",
+            color=col,
+            linewidth=1.5,
+            label=f"3 Sigma Ellipse, Arc {i+1} (~{day:.1f} Days)",
+        )
+        ax.plot(
+            Bt,
+            Br,
+            "x",
+            color=col,
+            markersize=8,
+            linewidth=2.0,
+            label=f"Arc {i+1}: BdotT={Bt:.1f}, BdotR={Br:.1f} km",
+        )
+
+    BdotT_true = 9796.737
+    BdotR_true = 14970.824
+    ax.plot(
+        BdotT_true,
+        BdotR_true,
+        "p",
+        markersize=12,
+        markerfacecolor="y",
+        markeredgecolor="k",
+        label=f"True Target: BdotT={BdotT_true:.3f}, BdotR={BdotR_true:.3f} km",
+    )
+
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(outdir / "bplane_3sigma_by_arc.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
 obs_2a_path = Path(__file__).resolve().parent / "Given_data" / "Project2a_Obs.txt"
 all_meas_2a = load_project2_obs_for_ukf(obs_2a_path)
 
@@ -490,7 +609,7 @@ ukf_2a = UnscentedKalmanFilter(
     J2=0.0,
     J3=0.0,
     Re=6378.1363,
-    alpha=1,
+    alpha=.075,
     beta=2.0,
     kappa=None,
     reltol=1.0e-10,
@@ -523,6 +642,98 @@ make_postfit_residuals_linear_plot(result_2a, final_plot_dir)
 
 make_all_state_3sigma_envelope_plot(out_ukf_2a, final_plot_dir)
 make_cr_3sigma_plot(out_ukf_2a, final_plot_dir)
+
+# Part (h): B-Plane 3-Sigma Ellipses At 50/100/150/200 Day Arcs
+arc_days_target = [50.0, 100.0, 150.0, 200.0]
+t_days_ukf = np.asarray(out_ukf_2a["t_meas"], dtype=float) / 86400.0
+xhat_ukf = np.asarray(out_ukf_2a["xhat_meas"], dtype=float)
+P_ukf = np.asarray(out_ukf_2a["P_meas"], dtype=float)
+
+bplane_records = []
+for d_target in arc_days_target:
+    idx = int(np.argmin(np.abs(t_days_ukf - float(d_target))))
+    x_arc = xhat_ukf[idx, :]
+    P_arc = P_ukf[idx, :, :]
+    t_arc = float(out_ukf_2a["t_meas"][idx])
+    d_sel = float(t_days_ukf[idx])
+
+    t_3soi_arc, x_3soi_arc, P_3soi_arc = propagate_snapshot_to_3soi_with_stm(
+        x_arc=x_arc,
+        P_arc=P_arc,
+        t_arc=t_arc,
+        t_search_days=400.0,
+    )
+
+    (
+        BdotR_arc,
+        BdotT_arc,
+        _sig_R,
+        _sig_T,
+        _sig_RT,
+        _X_cross,
+        P_Bplane_arc,
+        _STR2ECI,
+        _XPhi_BPlane,
+        _t_BPlane,
+    ) = calc_bplane(
+        XPhi_3SOI=x_3soi_arc,
+        t_3SOI=t_3soi_arc,
+        P_3SOI=P_3soi_arc,
+        pConst=pConst,
+        scConst=scConst,
+        earth_state_func=earth_state_func,
+        sun_state_func=sun_state_func,
+    )
+
+    # [T,R] covariance for assignment axis convention x=T, y=R
+    cov_tr = np.array(
+        [
+            [P_Bplane_arc[1, 1], P_Bplane_arc[1, 2]],
+            [P_Bplane_arc[1, 2], P_Bplane_arc[2, 2]],
+        ],
+        dtype=float,
+    )
+
+    bplane_records.append(
+        {
+            "day_target": float(d_target),
+            "day_selected": d_sel,
+            "idx": idx,
+            "t_arc_s": t_arc,
+            "t_3soi_s": float(t_3soi_arc),
+            "BdotT_km": float(BdotT_arc),
+            "BdotR_km": float(BdotR_arc),
+            "cov_tr": cov_tr,
+            "BdotT_error_km": float(BdotT_arc - 9796.737),
+            "BdotR_error_km": float(BdotR_arc - 14970.824),
+        }
+    )
+    print(
+        f"Arc Target {d_target:6.1f} Days (Selected {d_sel:7.2f}): "
+        f"BdotT={float(BdotT_arc):10.3f} km, "
+        f"BdotR={float(BdotR_arc):10.3f} km"
+    )
+
+make_bplane_arc_overlay_plot(bplane_records, final_plot_dir)
+
+bplane_summary_rows = []
+for rec in bplane_records:
+    bplane_summary_rows.append(
+        {
+            "day_target": rec["day_target"],
+            "day_selected": rec["day_selected"],
+            "BdotT_km": rec["BdotT_km"],
+            "BdotR_km": rec["BdotR_km"],
+            "BdotT_error_km": rec["BdotT_error_km"],
+            "BdotR_error_km": rec["BdotR_error_km"],
+            "sigma_T_km": float(np.sqrt(max(rec["cov_tr"][0, 0], 0.0))),
+            "sigma_R_km": float(np.sqrt(max(rec["cov_tr"][1, 1], 0.0))),
+        }
+    )
+
+pd.DataFrame(bplane_summary_rows).to_csv(final_plot_dir / "bplane_arc_summary.csv", index=False)
+print(f"Saved B-Plane Arc Summary: {final_plot_dir / 'bplane_arc_summary.csv'}")
+print(f"Saved B-Plane Arc Plot: {final_plot_dir / 'bplane_3sigma_by_arc.png'}")
 
 print(f"Saved Final Test Plots To: {final_plot_dir}")
 
