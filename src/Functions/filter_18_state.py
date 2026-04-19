@@ -37,6 +37,7 @@ Make sure your dynamics + state units are consistent with the standardized measu
 from __future__ import annotations
 
 import numpy as np
+import time
 
 from .propagation import propagate_x_phi_history, PropSettings
 from .range_rangerate import H_range_rangerate, H_tilde_range_rangerate_augmented
@@ -431,6 +432,7 @@ class LinearizedKalmanFilter18State(KalmanFilterBase):
         P_meas = np.full((N, self.n, self.n), np.nan, dtype=float)
         P_pf = np.full((N, self.n * self.n), np.nan, dtype=float)
         two_sigma = np.full((N, self.n), np.nan, dtype=float)
+        x_filt_hist = np.full((N, self.n), np.nan, dtype=float)
 
         state_error = None if Xtrue_meas is None else np.full((N, self.n), np.nan, dtype=float)
 
@@ -509,6 +511,7 @@ class LinearizedKalmanFilter18State(KalmanFilterBase):
             P_meas[j, :, :] = P
             P_pf[j, :] = P.reshape(-1, order="F")
             two_sigma[j, :] = 2.0 * np.sqrt(np.maximum(np.diag(P), 0.0))
+            x_filt_hist[j, :] = x_hat
 
             # nonlinear postfit residual
             if have_meas:
@@ -538,6 +541,10 @@ class LinearizedKalmanFilter18State(KalmanFilterBase):
             "xhat_meas": X_pf,
             "Xhat_meas": X_pf,
             "X_pf": X_pf,
+            "Xstar_hist": Xstar_hist,
+            "Phi_i0_hist": Phi_i0_hist,
+            "Phi_step": Phi_step,
+            "x_filt_hist": x_filt_hist,
             "prefit_resids_final": residuals,
             "postfit_resids_linear_final": resid_pf,
             "postfit_resids_meas": postfit_nl,
@@ -550,6 +557,87 @@ class LinearizedKalmanFilter18State(KalmanFilterBase):
             "rms_by_iter": None,
             "R": self.R,
         }
+
+    def run_iterated(
+        self,
+        all_meas,
+        stations=None,
+        Xtrue_meas: np.ndarray | None = None,
+        max_iter: int = 5,
+        tol: float = 1.0e-8,
+        reset_P0_each_iter: bool = True,
+        verbose: bool = True,
+    ):
+        """
+        Outer iteration on the LKF reference initial state X0_star.
+
+        At each outer iteration:
+          1) Run one full LKF pass about the current reference.
+          2) Back-map the final filtered error state to t0 via Phi(t_f,t_0):
+               dx0 = solve(Phi_tf_t0, xhat_tf)
+          3) Update reference: X0_star <- X0_star + dx0
+        """
+        max_iter = int(max_iter)
+        if max_iter < 1:
+            raise ValueError("max_iter must be >= 1.")
+        tol = float(tol)
+
+        ref_cur = np.asarray(self.X0_star, dtype=float).copy()
+        P0_nom = np.asarray(self.P0, dtype=float).copy()
+
+        iter_history = []
+        out_last = None
+        converged = False
+
+        for it in range(max_iter):
+            self.X0_star = ref_cur.copy()
+            if reset_P0_each_iter:
+                self.P0 = P0_nom.copy()
+                self.Phat = P0_nom.copy()
+
+            if hasattr(self, "reset_history"):
+                self.reset_history()
+
+            out_last = self.run(all_meas=all_meas, stations=stations, Xtrue_meas=Xtrue_meas)
+
+            x_filt_hist = np.asarray(out_last["x_filt_hist"], dtype=float)
+            Phi_i0_hist = np.asarray(out_last["Phi_i0_hist"], dtype=float)
+
+            x_tf = x_filt_hist[-1, :]
+            Phi_tf_t0 = Phi_i0_hist[-1, :, :]
+            dx0 = np.linalg.solve(Phi_tf_t0, x_tf)
+            dx0_norm = float(np.linalg.norm(dx0))
+
+            iter_history.append(
+                {
+                    "iter": int(it + 1),
+                    "dx0_norm": dx0_norm,
+                    "dx0": dx0.copy(),
+                    "X0_star_used": ref_cur.copy(),
+                }
+            )
+
+            if verbose:
+                print(f"Iterated LKF18 Outer Iter {it + 1}: ||dx0|| = {dx0_norm:.6e}")
+
+            if dx0_norm < tol:
+                converged = True
+                break
+
+            ref_cur = ref_cur + dx0
+
+        if out_last is None:
+            raise RuntimeError("Iterated LKF18 produced no output.")
+
+        out_last["iter_lkf"] = {
+            "converged": converged,
+            "num_outer_iters": len(iter_history),
+            "tol": tol,
+            "history": iter_history,
+            "suggested_next_X0_star": ref_cur,
+            "X0_star_used_last_run": self.X0_star.copy(),
+        }
+        return out_last
 
 
 class ExtendedKalmanFilter18State(KalmanFilterBase):
@@ -679,7 +767,15 @@ class ExtendedKalmanFilter18State(KalmanFilterBase):
 
         return X1, Phi_10
 
-    def run(self, all_meas, stations=None, Xtrue_meas=None, t_prev_init=None):
+    def run(
+        self,
+        all_meas,
+        stations=None,
+        Xtrue_meas=None,
+        t_prev_init=None,
+        show_progress: bool = False,
+        progress_every: int = 50,
+    ):
         station_map = {}
         if stations is not None:
             station_map = {st.name: st for st in stations}
@@ -710,6 +806,8 @@ class ExtendedKalmanFilter18State(KalmanFilterBase):
         P = np.asarray(self.Phat, dtype=float).reshape(self.n, self.n)
 
         prev_time = float(t_meas[0]) if t_prev_init is None else float(t_prev_init)
+        t_start_wall = time.perf_counter()
+        prog_step = max(int(progress_every), 1)
 
         I_n = np.eye(self.n)
         I_2 = np.eye(2)
@@ -794,6 +892,21 @@ class ExtendedKalmanFilter18State(KalmanFilterBase):
                 postfit_resid=postfit_nl[j, :],
                 Xtrue=(None if Xtrue_meas is None else Xtrue_meas[j, :]),
             )
+
+            if show_progress:
+                k = j + 1
+                if (k == N) or (k % prog_step == 0):
+                    elapsed = max(time.perf_counter() - t_start_wall, 1e-9)
+                    rate = k / elapsed
+                    eta = (N - k) / rate if rate > 0.0 else float("inf")
+                    bar_len = 28
+                    n_fill = int(round(bar_len * k / max(N, 1)))
+                    bar = "#" * n_fill + "-" * (bar_len - n_fill)
+                    msg = (
+                        f"\rEKF Progress [{bar}] {k}/{N} ({100.0 * k / max(N, 1):5.1f}%) "
+                        f"Elapsed {elapsed/60.0:6.2f} min  ETA {eta/60.0:6.2f} min"
+                    )
+                    print(msg, end=("\n" if k == N else ""), flush=True)
 
         self.Xhat = X_hat
         self.Phat = P
