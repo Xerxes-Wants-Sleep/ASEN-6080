@@ -208,7 +208,7 @@ def main():
         ],
     )
     #SNC
-    sigma_acc_km_s2 = 1.0e-6
+    sigma_acc_km_s2 = 1.0e-7
     Q_ekf = np.diag([sigma_acc_km_s2**2, sigma_acc_km_s2**2, sigma_acc_km_s2**2])
 
     dyn_ekf = lambda tau, x: mu_sun_srp_state_deriv(
