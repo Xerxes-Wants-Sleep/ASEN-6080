@@ -1,5 +1,5 @@
 import numpy as np
-from .jacobians import cannonball_SRP, srp_thirdbody_variational_eq
+from .jacobians import cannonball_SRP, srp_thirdbody_variational_eq, srp_thirdbody_variational_eq_for6state
 
 def srp_dyn(mu: float,
     mu_i: float,
@@ -172,3 +172,55 @@ def mu_sun_srp_stm_deriv(
     return np.hstack((dX, dPhi))
 
 
+
+
+
+def mu_sun_srp_stm_deriv_for6state(
+    t: float,
+    XPhi: np.ndarray,
+    pConst,
+    scConst,
+    Cr,
+    earth_state_func,
+    sun_state_func,
+):
+
+    XPhi = np.asarray(XPhi, dtype=float).reshape(-1)
+
+    n = 6
+    X = XPhi[:n]
+    Phi = XPhi[n:].reshape(n, n)
+
+    # Nonlinear state derivative
+    dX = mu_sun_srp_state_deriv(
+        t=t,
+        X=X,
+        pConst=pConst,
+        scConst=scConst,
+        earth_state_func=earth_state_func,
+        sun_state_func=sun_state_func,
+    )
+
+    # Current ephemeris states
+    r_sc = X[0:3]
+    r_earth, _ = earth_state_func(t)
+    r_sun, _ = sun_state_func(t)
+
+    # Continuous-time Jacobian
+    A = srp_thirdbody_variational_eq_for6state(
+        r_sc=r_sc,
+        r_earth=r_earth,
+        r_sun=r_sun,
+        Cr=Cr,
+        area=scConst.area,
+        mass=scConst.mass,
+        mu_earth=pConst.mu_earth,
+        mu_i=pConst.mu_sun,
+        solar_flux_1au=scConst.solar_flux_1au,
+        c=scConst.c,
+        AU_m=scConst.AU_m,
+    )
+
+    dPhi = (A @ Phi).reshape(-1)
+
+    return np.hstack((dX, dPhi))

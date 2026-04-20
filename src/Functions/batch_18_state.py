@@ -4,6 +4,27 @@ from .range_rangerate import H_range_rangerate, H_tilde_range_rangerate_augmente
 
 ## Batch Propagator for ASEN 6080 Project 1
 
+
+def _get_meas_pair_state_units(m: dict) -> np.ndarray:
+    """
+    Return measurement vector [rho, rho_dot] in the SAME units as the
+    propagated state/model.
+
+    Accepted key aliases:
+      - ('rho_km', 'rho_dot_km_s')
+      - ('rho_m',  'rho_dot_m_s')
+
+    No implicit scaling is applied.
+    """
+    if ("rho_km" in m) and ("rho_dot_km_s" in m):
+        return np.array([m["rho_km"], m["rho_dot_km_s"]], dtype=float)
+    if ("rho_m" in m) and ("rho_dot_m_s" in m):
+        return np.array([m["rho_m"], m["rho_dot_m_s"]], dtype=float)
+    raise KeyError(
+        "Measurement dict must contain either "
+        "('rho_km','rho_dot_km_s') or ('rho_m','rho_dot_m_s')."
+    )
+
 def batch_estimate_x0(
     all_meas,
     stations,
@@ -103,13 +124,8 @@ def batch_estimate_x0(
             x_curr = X_hist[j, :]
             Phi_curr = Phi_hist[j, :, :]
 
-            # --- observed measurement (standardize to meters + m/s) ---
-            # If your meas dict uses km fields, convert here.
-            if "rho_km" in m:
-                y_obs = np.array([m["rho_km"] * 1000.0, m["rho_dot_km_s"] * 1000.0], dtype=float)
-            else:
-                # assume meters
-                y_obs = np.array([m["rho_m"], m["rho_dot_m_s"]], dtype=float)
+            # observed measurement (same units as state; no implicit scaling)
+            y_obs = _get_meas_pair_state_units(m)
 
             # --- predicted measurement + H_local ---
             if (n >= 18) and (station_state_map is not None):
@@ -243,10 +259,7 @@ def batch_estimate_x0(
     for k, m in enumerate(all_meas):
         st_key = m["station"]
 
-        if "rho_km" in m:
-            y_obs = np.array([m["rho_km"] * 1000.0, m["rho_dot_km_s"] * 1000.0], dtype=float)
-        else:
-            y_obs = np.array([m["rho_m"], m["rho_dot_m_s"]], dtype=float)
+        y_obs = _get_meas_pair_state_units(m)
 
         # --- baseline prediction ---
         xb = X_base[k, :]

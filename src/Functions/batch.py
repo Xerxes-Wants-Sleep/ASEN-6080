@@ -104,14 +104,9 @@ def batch_estimate_x0(
             )
         from .batch_18_state import batch_estimate_x0 as batch_estimate_x0_generic
 
-        # Keep legacy km-unit behavior when routing through generic batch path.
-        all_meas_generic = []
-        for m in all_meas:
-            d = dict(m)
-            if ("rho_km" in d) and ("rho_dot_km_s" in d):
-                d["rho_m"] = d.pop("rho_km")
-                d["rho_dot_m_s"] = d.pop("rho_dot_km_s")
-            all_meas_generic.append(d)
+        # Pass measurements through directly.
+        # Generic batch now accepts both key styles and uses state units.
+        all_meas_generic = [dict(m) for m in all_meas]
 
         settings = prop_settings
         if settings is None:

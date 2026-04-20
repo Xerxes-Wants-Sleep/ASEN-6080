@@ -598,3 +598,86 @@ def srp_thirdbody_variational_eq(r_sc: np.ndarray,
 
 
 
+def srp_thirdbody_variational_eq_for6state(r_sc: np.ndarray,
+    r_earth: np.ndarray,
+    r_sun: np.ndarray,
+    Cr: float,
+    area: float,
+    mass: float,
+    mu_earth: float,
+    mu_i: float,
+    solar_flux_1au: float = 1357.0,   # W/m^2 at 1 AU
+    c: float = 299792458.0,            # m/s
+    AU_m: float = 149597870700,        # m
+):
+    """
+    Combined SRP and third-body acceleration and partials for STM.
+
+    Returns
+    -------
+    a_total : (3,) ndarray
+        Total perturbation acceleration (SRP + third-body) in km/s^2.
+    dadr_sc : (3,3) ndarray
+        Partial of total acceleration wrt spacecraft position r_sc, units 1/s^2.
+    dadCr : (3,) ndarray
+        Partial of total acceleration wrt Cr.
+    """
+    G_2b = dadr_2body(r_sc - r_earth, mu_earth)
+    _, G_3b = third_body_accel_partials(r_sc, r_earth, r_sun, mu_i)
+    _, G_srp, da_dCr = cannonball_SRP(r_sc, r_sun, Cr, area, mass, solar_flux_1au, c, AU_m)
+
+    G = G_2b + G_3b + G_srp
+
+    A = np.zeros((6, 6))
+    A[0:3, 3:6] = np.eye(3)
+    A[3:6, 0:3] = G
+    
+    return A
+
+
+
+
+def srp_thirdbody_variational_eq_man_estimate(r_sc, r_earth, r_sun,
+    Cr, area, mass, mu_earth, mu_i,
+    solar_flux_1au=1357.0, c=299792458.0, AU_m=149597870700):
+    """
+    9x9 continuous Jacobian for X = [r(0:3), v(3:6), dv(6:9)]
+    Cr is fixed, not estimated, so no da_dCr column.
+    """
+    G_2b = dadr_2body(r_sc - r_earth, mu_earth)
+    _, G_3b = third_body_accel_partials(r_sc, r_earth, r_sun, mu_i)
+    _, G_srp, _ = cannonball_SRP(r_sc, r_sun, Cr, area, mass,
+                                  solar_flux_1au, c, AU_m)
+
+    G = G_2b + G_3b + G_srp
+
+    A = np.zeros((9, 9))
+    A[0:3, 3:6] = np.eye(3)  # dr/dt = v
+    A[3:6, 0:3] = G           # dv/dt depends on r
+    # A[3:6, 6:9] = 0  -- Δv doesn't appear in continuous dynamics
+    # A[6:9, :]   = 0  -- Δv is constant
+
+    return A
+
+
+def apply_maneuver_jump(X, Phi):
+    """
+    At t_man, manually insert the STM sensitivity block for Δv
+    then update state. Call this between integration steps.
+    
+    X   : (9,)   current state [r, v, Δv]
+    Phi : (9,9)  current STM
+    """
+    # The rv block tells us how r,v respond to perturbations
+    Phi_rv = Phi[0:6, 0:6]
+
+    # Sensitivity of [r,v] to Δv: effect of Δv kick propagated forward
+    # At t_man, Δv directly kicks velocity, so sensitivity is [0; I]
+    # carried forward by Phi_rv
+    Phi[0:6, 6:9] = Phi_rv @ np.vstack([np.zeros((3,3)), np.eye(3)])
+
+    # Apply the maneuver kick to state
+    X[3:6] += X[6:9]
+
+    return X, Phi
+

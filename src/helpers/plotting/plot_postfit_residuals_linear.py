@@ -27,7 +27,7 @@ def _qqplot(ax, data, label=None):
     ax.plot([lim_min, lim_max], [lim_min, lim_max], "k--", linewidth=1)
 
 
-def _residuals_1x3_row(fig, gs_row, t_sec, res, masks, title, ylab):
+def _residuals_1x3_row(fig, gs_row, t_sec, res, masks, title, ylab, three_sigma=None):
     ax_ts = fig.add_subplot(gs_row[0])
     ax_hist = fig.add_subplot(gs_row[1])
     ax_qq = fig.add_subplot(gs_row[2])
@@ -35,6 +35,9 @@ def _residuals_1x3_row(fig, gs_row, t_sec, res, masks, title, ylab):
     for s, m in masks.items():
         ax_ts.plot(t_sec[m], res[m], ".", label=s, markersize=2)
     ax_ts.axhline(0.0, color="0.4", linestyle=":", linewidth=1.0)
+    if three_sigma is not None and np.isfinite(three_sigma) and float(three_sigma) > 0.0:
+        ax_ts.axhline(+three_sigma, color="C3", linestyle="--", linewidth=1.0, label="+/- 3 Sigma")
+        ax_ts.axhline(-three_sigma, color="C3", linestyle="--", linewidth=1.0, label="_nolegend_")
     ax_ts.set_title(title)
     ax_ts.set_ylabel(ylab)
     ax_ts.set_xlabel("Time (s)")
@@ -54,6 +57,32 @@ def _residuals_1x3_row(fig, gs_row, t_sec, res, masks, title, ylab):
     ax_qq.set_ylabel("Sample Quantiles")
 
 
+def _extract_three_sigma_bounds(result: BatchPostProcessResult):
+    """
+    Returns (range_3sigma, range_rate_3sigma) from measurement covariance in result.R.
+    Supports constant 2x2 R or time-varying Nx2x2 R.
+    """
+    if result.R is None:
+        return None, None
+
+    R = np.asarray(result.R, dtype=float)
+    if R.ndim == 2 and R.shape[0] >= 2 and R.shape[1] >= 2:
+        var_rho = float(R[0, 0])
+        var_rhod = float(R[1, 1])
+    elif R.ndim == 3 and R.shape[1] >= 2 and R.shape[2] >= 2:
+        var_rho = float(np.nanmedian(R[:, 0, 0]))
+        var_rhod = float(np.nanmedian(R[:, 1, 1]))
+    else:
+        return None, None
+
+    if (not np.isfinite(var_rho)) or (not np.isfinite(var_rhod)):
+        return None, None
+
+    sig3_rho = 3.0 * float(np.sqrt(max(var_rho, 0.0)))
+    sig3_rhod = 3.0 * float(np.sqrt(max(var_rhod, 0.0)))
+    return sig3_rho, sig3_rhod
+
+
 def make_postfit_residuals_linear_plot(result: BatchPostProcessResult, outdir: Path, show: bool = False) -> None:
     pf = result.postfit_resids_linear_final
     if pf is None:
@@ -61,6 +90,7 @@ def make_postfit_residuals_linear_plot(result: BatchPostProcessResult, outdir: P
 
     t_sec = np.asarray(result.t_meas, dtype=float)
     masks = station_masks(result.station_meas)
+    sig3_rho, sig3_rhod = _extract_three_sigma_bounds(result)
 
     fig = plt.figure(figsize=(14, 6))
     gs = fig.add_gridspec(2, 3, width_ratios=[2.8, 1.1, 1.1], hspace=0.35, wspace=0.3)
@@ -73,6 +103,7 @@ def make_postfit_residuals_linear_plot(result: BatchPostProcessResult, outdir: P
         masks,
         "Range",
         "Range Residual (m)",
+        three_sigma=sig3_rho,
     )
     _residuals_1x3_row(
         fig,
@@ -82,6 +113,7 @@ def make_postfit_residuals_linear_plot(result: BatchPostProcessResult, outdir: P
         masks,
         "Range-rate",
         "Range-rate Residual (m/s)",
+        three_sigma=sig3_rhod,
     )
 
     savefig(fig, outdir / "postfit_residuals_linear.png", show=show, tight_layout=False)

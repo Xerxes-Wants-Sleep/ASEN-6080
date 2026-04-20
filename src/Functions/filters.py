@@ -9,17 +9,35 @@ from .propagation import PropSettings
 
 def _legacy_km_meas_to_delegate_units(all_meas):
     """
-    Convert legacy km-key measurements to generic-filter keys without rescaling.
-    This avoids unintended x1000 conversion inside filter_18_state-style code paths.
+    Return shallow-copied measurements for delegate filters.
+
+    Delegate filters now accept both key styles directly:
+      - ('rho_km', 'rho_dot_km_s')
+      - ('rho_m', 'rho_dot_m_s')
+    and consume values in the same units as the propagated state.
     """
-    out = []
-    for m in all_meas:
-        d = dict(m)
-        if ("rho_km" in d) and ("rho_dot_km_s" in d):
-            d["rho_m"] = d.pop("rho_km")
-            d["rho_dot_m_s"] = d.pop("rho_dot_km_s")
-        out.append(d)
-    return out
+    return [dict(m) for m in all_meas]
+
+
+def _get_meas_pair_state_units(m: dict) -> np.ndarray:
+    """
+    Return measurement vector [rho, rho_dot] in the SAME units as the
+    propagated state/model.
+
+    Accepted key aliases:
+      - ('rho_km', 'rho_dot_km_s')
+      - ('rho_m',  'rho_dot_m_s')
+
+    No implicit scaling is applied.
+    """
+    if ("rho_km" in m) and ("rho_dot_km_s" in m):
+        return np.array([m["rho_km"], m["rho_dot_km_s"]], dtype=float)
+    if ("rho_m" in m) and ("rho_dot_m_s" in m):
+        return np.array([m["rho_m"], m["rho_dot_m_s"]], dtype=float)
+    raise KeyError(
+        "Measurement dict must contain either "
+        "('rho_km','rho_dot_km_s') or ('rho_m','rho_dot_m_s')."
+    )
  
 
 
@@ -569,7 +587,7 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             t = float(t_meas[j])
             st = station_map[st_meas[j]]
 
-            Y = np.array([all_meas[j]["rho_km"], all_meas[j]["rho_dot_km_s"]], dtype=float)
+            Y = _get_meas_pair_state_units(all_meas[j])
             Xstar = Xstar_hist[j, :]
             Phi = Phi_step[j, :, :]
 
@@ -733,7 +751,104 @@ class LinearizedKalmanFilter(KalmanFilterBase):
             "state_error_meas": state_error,
             "rms_final": rms_final,
             "rms_by_iter": None,
+            "R": np.asarray(self.R, dtype=float).copy(),
         }
+
+    def run_iterated(
+        self,
+        all_meas,
+        stations,
+        Xtrue_meas: np.ndarray | None = None,
+        max_iters: int = 5,
+        iter_tol: float = 1.0e-8,
+        show_progress: bool = False,
+        progress_every: int = 50,
+        verbose: bool = True,
+    ):
+        """
+        Outer-loop ILKF: rerun LKF while relinearizing the reference initial
+        state from the previous iteration's first post-fit state.
+        """
+        if hasattr(self, "_delegate"):
+            all_meas_delegate = _legacy_km_meas_to_delegate_units(all_meas)
+            out = self._delegate.run_iterated(
+                all_meas=all_meas_delegate,
+                stations=stations,
+                Xtrue_meas=Xtrue_meas,
+                max_iters=max_iters,
+                iter_tol=iter_tol,
+                show_progress=show_progress,
+                progress_every=progress_every,
+                verbose=verbose,
+            )
+            self.Xhat = np.asarray(self._delegate.Xhat, dtype=float).copy()
+            self.Phat = np.asarray(self._delegate.Phat, dtype=float).copy()
+            return out
+
+        max_iters = max(int(max_iters), 1)
+        iter_tol = float(iter_tol)
+
+        x0_ref = np.asarray(self.X0_star, dtype=float).reshape(6,).copy()
+        p0_ref = np.asarray(self.P0, dtype=float).reshape(6, 6).copy()
+
+        out_last = None
+        rms_by_iter = []
+        iter_x0_hist = []
+        iter_dx0_norm = []
+        iter_converged = False
+
+        for it in range(1, max_iters + 1):
+            self.X0_star = x0_ref.copy()
+            self.xhat = np.zeros(6, dtype=float)
+            self.Xhat = self.X0_star.copy()
+            self.Phat = p0_ref.copy()
+            self.reset_history()
+
+            out_i = self.run(
+                all_meas=all_meas,
+                stations=stations,
+                Xtrue_meas=Xtrue_meas,
+                run_smoother=True,
+                smooth_back_points=None,
+                show_progress=show_progress,
+                progress_every=progress_every,
+            )
+            out_last = out_i
+            rms_by_iter.append(out_i.get("rms_final", None))
+
+            if out_i.get("Xhat_smooth", None) is not None:
+                x0_next = np.asarray(out_i["Xhat_smooth"][0], dtype=float).reshape(6,).copy()
+            else:
+                x0_next = np.asarray(out_i["Xhat_meas"][0], dtype=float).reshape(6,).copy()
+            dx0 = x0_next - x0_ref
+            dx0_norm = float(np.linalg.norm(dx0))
+            iter_x0_hist.append(x0_next.copy())
+            iter_dx0_norm.append(dx0_norm)
+
+            if verbose:
+                print(f"ILKF Iter {it:02d}/{max_iters}: ||dX0||={dx0_norm:.6e}")
+
+            if dx0_norm <= iter_tol:
+                iter_converged = True
+                x0_ref = x0_next
+                break
+
+            x0_ref = x0_next
+
+        if out_last is None:
+            raise RuntimeError("ILKF failed to produce output.")
+
+        self.X0_star = x0_ref.copy()
+        self.Xhat = np.asarray(out_last["Xhat_meas"][-1], dtype=float).reshape(6,).copy()
+        self.Phat = np.asarray(out_last["P_meas"][-1], dtype=float).reshape(6, 6).copy()
+
+        out_last["rms_by_iter"] = rms_by_iter
+        out_last["iter_count"] = len(rms_by_iter)
+        out_last["iter_converged"] = bool(iter_converged)
+        out_last["iter_dx0_norm"] = np.asarray(iter_dx0_norm, dtype=float)
+        out_last["iter_x0_hist"] = np.asarray(iter_x0_hist, dtype=float)
+
+        return out_last
     
 
 
@@ -917,10 +1032,21 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         t_prev_init=None,
         show_progress: bool = False,
         progress_every: int = 50,
+        iterated: bool = False,
+        max_iter: int = 10,
+        iter_tol: float = 1e-8,
     ):
         if hasattr(self, "_delegate"):
             all_meas_delegate = _legacy_km_meas_to_delegate_units(all_meas)
-            out = self._delegate.run(all_meas_delegate, stations=stations, Xtrue_meas=Xtrue_meas, t_prev_init=t_prev_init)
+            out = self._delegate.run(
+                all_meas_delegate,
+                stations=stations,
+                Xtrue_meas=Xtrue_meas,
+                t_prev_init=t_prev_init,
+                iterated=iterated,
+                max_iter=max_iter,
+                iter_tol=iter_tol,
+            )
             self.Xhat = np.asarray(self._delegate.Xhat, dtype=float).copy()
             self.Phat = np.asarray(self._delegate.Phat, dtype=float).copy()
             return out
@@ -943,14 +1069,19 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         # -----------------------------
         # 1) Allocate outputs
         # -----------------------------
-        residuals = np.full((N, 2), np.nan, dtype=float)     # prefit (OminusC)
-        resid_pf  = np.full((N, 2), np.nan, dtype=float)     # linear postfit
-        postfit_nl = np.full((N, 2), np.nan, dtype=float)    # nonlinear postfit (keep)
+        residuals  = np.full((N, 2), np.nan, dtype=float)   # prefit (OminusC)
+        resid_pf   = np.full((N, 2), np.nan, dtype=float)   # linear postfit
+        postfit_nl = np.full((N, 2), np.nan, dtype=float)   # nonlinear postfit
 
-        X_pf = np.full((N, 6), np.nan, dtype=float)          # post-fit state history
-        P_meas = np.full((N, 6, 6), np.nan, dtype=float)     # post-fit covariance history
-        P_pf = np.full((N, 36), np.nan, dtype=float)        
-        two_sigma = np.full((N, 6), np.nan, dtype=float)
+        X_pf      = np.full((N, 6),    np.nan, dtype=float)
+        P_meas    = np.full((N, 6, 6), np.nan, dtype=float)
+        P_pf      = np.full((N, 36),   np.nan, dtype=float)
+        two_sigma = np.full((N, 6),    np.nan, dtype=float)
+
+        # Stored for smoother
+        X_pred_hist  = np.full((N, 6),    np.nan, dtype=float)
+        P_pred_hist  = np.full((N, 6, 6), np.nan, dtype=float)
+        Phi_step_hist = np.full((N, 6, 6), np.nan, dtype=float)
 
         state_error = None if Xtrue_meas is None else np.full((N, 6), np.nan, dtype=float)
 
@@ -971,7 +1102,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
 
             t = float(t_meas[j])
             st = station_map[st_meas[j]]
-            Y = np.array([all_meas[j]["rho_km"], all_meas[j]["rho_dot_km_s"]], dtype=float)
+            Y = _get_meas_pair_state_units(all_meas[j])
 
             # ---- Time Update (propagate state + STM) ----
             dt = t - prev_time
@@ -979,56 +1110,76 @@ class ExtendedKalmanFilter(KalmanFilterBase):
             Qk = self.build_process_noise(dt, r_eci=Xbar[:3], v_eci=Xbar[3:6])
             Pbar = Phi @ P @ Phi.T + Qk
 
-            # ---- Observation / prefit residual ----
-            # Compute station ECI once and reuse for G(), Htilde, and postfit
+            # Store predicted quantities for smoother
+            X_pred_hist[j, :]    = Xbar
+            P_pred_hist[j, :, :] = Pbar
+            Phi_step_hist[j, :, :] = Phi
+
+            # ---- Precompute station ECI (reused in all iterations) ----
             Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
             C = self.G(st, Xbar, t)
-            if C is not None:
 
+            if C is not None:
                 OminusC = Y - C
                 residuals[j, :] = OminusC
 
-                # ---- Linearize measurement ----
-                Htilde = H_range_rangerate(Xbar[:3], Xbar[3:6], Rs, Vs)
+                if not iterated:
+                    # ---- Standard (non-iterated) measurement update ----
+                    Htilde = H_range_rangerate(Xbar[:3], Xbar[3:6], Rs, Vs)
+                    S = Htilde @ Pbar @ Htilde.T + self.R
+                    K = Pbar @ Htilde.T @ np.linalg.solve(S, np.eye(2))
+                    X_hat = Xbar + K @ OminusC
+                    A = np.eye(6) - K @ Htilde
+                    P = A @ Pbar @ A.T + K @ self.R @ K.T
 
-                # ---- Kalman gain ----
-                S = Htilde @ Pbar @ Htilde.T + self.R
-                K = Pbar @ Htilde.T @ np.linalg.solve(S, np.eye(2))
+                else:
+                    # ---- Iterated EKF measurement update (Lecture 17) ----
+                    # Iterate the linearization point until convergence.
+                    # K and P use Pbar (the prior) throughout, per the IEKF formulation.
+                    X_i = Xbar.copy()
+                    P_i = Pbar.copy()
+                    for _ in range(max_iter):
+                        Htilde = H_range_rangerate(X_i[:3], X_i[3:6], Rs, Vs)
+                        S = Htilde @ Pbar @ Htilde.T + self.R
+                        K = Pbar @ Htilde.T @ np.linalg.solve(S, np.eye(2))
+                        # IEKF update: re-linearize about X_i but correct from Xbar
+                        h_i = self.G(st, X_i, t)
+                        innov = Y - h_i - Htilde @ (Xbar - X_i)
+                        X_next = Xbar + K @ innov
+                        A = np.eye(6) - K @ Htilde
+                        P_i = A @ Pbar @ A.T + K @ self.R @ K.T
+                        if np.linalg.norm(X_next - X_i) < iter_tol:
+                            X_i = X_next
+                            break
+                        X_i = X_next
+                    X_hat = X_i
+                    P = P_i
 
-                # ---- Measurement Update ----
-                X_hat = Xbar + K @ OminusC
-                A = np.eye(6) - K @ Htilde
-                P = A @ Pbar @ A.T + K @ self.R @ K.T
-
-                # ---- Linear post-fit residual
+                # ---- Post-fit residuals (shared by both paths) ----
                 x_hat_err = X_hat - Xbar
-                resid_pf[j, :] = OminusC - (Htilde @ x_hat_err)
+                Htilde_pf = H_range_rangerate(Xbar[:3], Xbar[3:6], Rs, Vs)
+                resid_pf[j, :] = OminusC - (Htilde_pf @ x_hat_err)
 
-                # ---- Nonlinear post-fit residual (reuse Rs, Vs already computed) ----
                 C_hat = self.G(st, X_hat, t)
                 postfit_nl[j, :] = (Y - C_hat) if (C_hat is not None) else np.array([np.nan, np.nan], dtype=float)
-
 
             else:
                 # No measurement update
                 X_hat, P = Xbar, Pbar
 
-            # ---- Store outputs (single block) ----
-            X_pf[j, :] = X_hat
+            # ---- Store outputs ----
+            X_pf[j, :]      = X_hat
             P_meas[j, :, :] = P
-            P_pf[j, :] = P.reshape(-1, order="F") 
+            P_pf[j, :]      = P.reshape(-1, order="F")
             two_sigma[j, :] = 2.0 * np.sqrt(np.maximum(np.diag(P), 0.0))
 
             if state_error is not None:
                 state_error[j, :] = X_hat - Xtrue_meas[j, :]
 
-            # advance time
             prev_time = t
-
-            # log nonlinear postfit into base history (optional)
             self.Xhat = X_hat
             self.log_epoch(t, postfit_resid=postfit_nl[j, :],
-                        Xtrue=(None if Xtrue_meas is None else Xtrue_meas[j, :]))
+                           Xtrue=(None if Xtrue_meas is None else Xtrue_meas[j, :]))
 
             if show_progress:
                 k = j + 1
@@ -1039,8 +1190,9 @@ class ExtendedKalmanFilter(KalmanFilterBase):
                     bar_len = 28
                     n_fill = int(round(bar_len * k / max(N, 1)))
                     bar = "#" * n_fill + "-" * (bar_len - n_fill)
+                    label = "IEKF" if iterated else "EKF"
                     msg = (
-                        f"\rEKF Progress [{bar}] {k}/{N} ({100.0 * k / max(N, 1):5.1f}%) "
+                        f"\r{label} Progress [{bar}] {k}/{N} ({100.0 * k / max(N, 1):5.1f}%) "
                         f"Elapsed {elapsed/60.0:6.2f} min  ETA {eta/60.0:6.2f} min"
                     )
                     print(msg, end=("\n" if k == N else ""), flush=True)
@@ -1049,7 +1201,8 @@ class ExtendedKalmanFilter(KalmanFilterBase):
         self.Xhat = X_hat
         self.Phat = P
 
-        rms_final = self.print_rms_summary(label="EKF", first_pass_gap_s=self.first_pass_gap_s)
+        label = "IEKF" if iterated else "EKF"
+        rms_final = self.print_rms_summary(label=label, first_pass_gap_s=self.first_pass_gap_s)
 
         return {
             "t_meas": t_meas,
@@ -1064,11 +1217,175 @@ class ExtendedKalmanFilter(KalmanFilterBase):
             "P_meas": P_meas,
             "P_pf": P_pf,
             "two_sigma_meas": two_sigma,
+            "X_pred_hist": X_pred_hist,
+            "P_pred_hist": P_pred_hist,
+            "Phi_step_hist": Phi_step_hist,
             "rms_final": rms_final,
-            "rms_by_iter": None
+            "rms_by_iter": None,
         }
 
+    def smooth(self, run_out: dict, stations: list) -> dict:
+        if hasattr(self, "_delegate"):
+            smooth_out = self._delegate.smooth(run_out=run_out, stations=stations)
+            self.Xhat = np.asarray(self._delegate.Xhat, dtype=float).copy()
+            self.Phat = np.asarray(self._delegate.Phat, dtype=float).copy()
+            return smooth_out
 
+        """
+        EKF Forward-Backward smoother (Fraser-Potter), per Lecture 19.
+
+        Runs a backward EKF pass then combines with the forward pass:
+
+            W_k   = P_B,k  @ inv(P_F,k + P_B,k)
+            X_S,k = W_k @ X_F,k + (I - W_k) @ X_B,k
+            P_S,k = W_k @ P_F,k @ W_k.T + (I - W_k) @ P_B,k @ (I - W_k).T
+
+        Backward filter initial conditions: Lambda_B = P_B^{-1} = 0
+        (infinite backward covariance at the last epoch so the smoothed
+        estimate there equals the forward posterior).
+
+        Parameters
+        ----------
+        run_out  : dict returned by self.run()
+        stations : same station list passed to run()
+
+        Returns
+        -------
+        Adds / returns a dict with keys merged into run_out:
+            'Xhat_smooth'       (N, 6)
+            'P_smooth'          (N, 6, 6)
+            'two_sigma_smooth'  (N, 6)
+            'state_error_smooth' (N, 6) or None
+        """
+        X_F  = run_out["X_pf"]           # (N, 6)  forward posterior states
+        P_F  = run_out["P_meas"]          # (N,6,6) forward posterior covs
+        X_bar = run_out["X_pred_hist"]    # (N, 6)  forward predicted states
+        P_bar = run_out["P_pred_hist"]    # (N,6,6) forward predicted covs
+        Phi   = run_out["Phi_step_hist"]  # (N,6,6) Phi(t_k, t_{k-1})
+        t_meas  = run_out["t_meas"]
+        st_meas = run_out["station_meas"]
+
+        N = X_F.shape[0]
+        n = 6
+        I6 = np.eye(n)
+
+        station_map = {st.name: st for st in stations}
+
+        # ------------------------------------------------------------------
+        # 1) Backward pass — information form to avoid inverting near-singular P_B
+        #    Lambda_B = P_B^{-1},  xi_B = P_B^{-1} @ X_B
+        # ------------------------------------------------------------------
+        # Initial conditions at k = N-1 (last epoch):
+        #   Lambda_B,f = 0  (know nothing going backward)
+        #   xi_B,f     = 0
+        Lambda_B = np.zeros((n, n), dtype=float)
+        xi_B     = np.zeros(n, dtype=float)
+
+        Lambda_B_hist = np.full((N, n, n), np.nan, dtype=float)
+        xi_B_hist     = np.full((N, n),    np.nan, dtype=float)
+        Lambda_B_hist[N - 1] = Lambda_B
+        xi_B_hist[N - 1]     = xi_B
+
+        for k in range(N - 2, -1, -1):
+            t  = float(t_meas[k + 1])
+            st = station_map[st_meas[k + 1]]
+
+            # Measurement at k+1 in information form: Lambda_y, xi_y
+            # H and R evaluated at the forward linearization point X_bar[k+1]
+            Rs, Vs, _ = st.ecef2eci(t, st.r_ecef, np.zeros(3))
+            C = self.G(st, X_bar[k + 1], t)
+
+            if C is not None:
+                H = H_range_rangerate(X_bar[k + 1, :3], X_bar[k + 1, 3:6], Rs, Vs)
+                R_inv = np.linalg.solve(self.R, np.eye(2))
+                Lambda_y = H.T @ R_inv @ H
+                xi_y     = H.T @ R_inv @ (run_out["prefit_resids_final"][k + 1]
+                                           + H @ X_bar[k + 1])
+            else:
+                Lambda_y = np.zeros((n, n), dtype=float)
+                xi_y     = np.zeros(n, dtype=float)
+
+            # Backward information update at k+1
+            Lambda_post = Lambda_B + Lambda_y
+            xi_post     = xi_B + xi_y
+
+            # Backward time update: propagate information from k+1 back to k
+            # P_B,k^- = Phi_{k+1,k} @ inv(Lambda_post + Q_bar^{-1}) @ Phi_{k+1,k}.T
+            # In the no-process-noise case (Q=0) this simplifies cleanly.
+            # General form using matrix inversion lemma on (Lambda_post):
+            Phi_k  = Phi[k + 1]                   # Phi(t_{k+1}, t_k)
+            Phi_kT = Phi_k.T
+
+            # Propagate covariance backward (the information-form time update):
+            #   Lambda_B,k = Phi_k.T @ Lambda_post @ Phi_k  (no process noise)
+            # With process noise Qk at step k+1:
+            #   Lambda_B,k = inv(Phi_k @ inv(Lambda_post) @ Phi_k.T + Qk)
+            # We use the second form for correctness.
+            dt_k = float(t_meas[k + 1]) - float(t_meas[k])
+            Qk = self.build_process_noise(dt_k, r_eci=X_bar[k, :3], v_eci=X_bar[k, 3:6])
+
+            # inv(Lambda_post) safely via solve
+            if np.trace(Lambda_post) < 1e-30:
+                # Lambda_post ~ 0 => P_B = inf => Lambda_B = 0
+                Lambda_B = np.zeros((n, n), dtype=float)
+                xi_B     = np.zeros(n, dtype=float)
+            else:
+                P_post = np.linalg.solve(Lambda_post, I6)
+                P_B_k  = Phi_k @ P_post @ Phi_kT + Qk
+                Lambda_B = np.linalg.solve(P_B_k, I6)
+                xi_B     = Lambda_B @ (Phi_k @ np.linalg.solve(Lambda_post, xi_post))
+
+            Lambda_B_hist[k] = Lambda_B
+            xi_B_hist[k]     = xi_B
+
+        # ------------------------------------------------------------------
+        # 2) Combine forward and backward at each epoch (Fraser-Potter)
+        # ------------------------------------------------------------------
+        X_smooth    = np.full((N, n),    np.nan, dtype=float)
+        P_smooth_out = np.full((N, n, n), np.nan, dtype=float)
+
+        for k in range(N):
+            P_Fk = P_F[k]                    # forward posterior cov
+            X_Fk = X_F[k]                    # forward posterior state
+
+            Lambda_Bk = Lambda_B_hist[k]
+            xi_Bk     = xi_B_hist[k]
+
+            # Recover backward state (only needed where Lambda_B is nonzero)
+            if np.trace(Lambda_Bk) < 1e-30:
+                # Backward filter knows nothing here: smoothed = forward
+                X_smooth[k]     = X_Fk
+                P_smooth_out[k] = P_Fk
+            else:
+                P_Bk = np.linalg.solve(Lambda_Bk, I6)
+                X_Bk = P_Bk @ xi_Bk
+
+                # W_k = P_B,k @ inv(P_F,k + P_B,k)
+                W = P_Bk @ np.linalg.solve(P_Fk + P_Bk, I6)
+                IW = I6 - W
+
+                X_smooth[k]     = W @ X_Fk + IW @ X_Bk
+                P_smooth_out[k] = W @ P_Fk @ W.T + IW @ P_Bk @ IW.T
+
+        two_sigma_smooth = 2.0 * np.sqrt(
+            np.maximum(np.diagonal(P_smooth_out, axis1=1, axis2=2), 0.0)
+        )
+
+        # State error if truth was available
+        state_error_smooth = None
+        if run_out.get("state_error_meas") is not None:
+            # state_error_meas = X_F - Xtrue, so Xtrue = X_F - state_error_meas
+            Xtrue = X_F - run_out["state_error_meas"]
+            state_error_smooth = X_smooth - Xtrue
+
+        smooth_out = {
+            "Xhat_smooth":        X_smooth,
+            "P_smooth":           P_smooth_out,
+            "two_sigma_smooth":   two_sigma_smooth,
+            "state_error_smooth": state_error_smooth,
+        }
+        run_out.update(smooth_out)
+        return smooth_out
     
     def run_warmstarted(
         self,
@@ -1125,6 +1442,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
                 "P_pf": np.empty((0, 36), dtype=float),
                 "rms_final": None,
                 "rms_by_iter": None,
+                "R": np.asarray(self.R, dtype=float).copy(),
             }
 
         # Truth must be aligned to the *same sorted order*
@@ -1263,6 +1581,7 @@ class ExtendedKalmanFilter(KalmanFilterBase):
             "P_pf": P_pf_comb,
             "rms_final": rms_combined,
             "rms_by_iter": None,
+            "R": np.asarray(self.R, dtype=float).copy(),
         }
 
 
@@ -1490,10 +1809,7 @@ class UnscentedKalmanFilter(KalmanFilterBase):
             t = float(t_meas[j])
             st = station_map[st_meas[j]]
 
-            Y = np.array(
-                [all_meas[j]["rho_km"], all_meas[j]["rho_dot_km_s"]],
-                dtype=float,
-            )
+            Y = _get_meas_pair_state_units(all_meas[j])
 
             t_prev = t if j == 0 else float(t_meas[j - 1])
             dt = 0.0 if j == 0 else (t - t_prev)
@@ -1638,4 +1954,5 @@ class UnscentedKalmanFilter(KalmanFilterBase):
             "state_error_meas": state_error,
             "rms_final": rms_final,
             "rms_by_iter": None,
+            "R": np.asarray(self.R, dtype=float).copy(),
         }

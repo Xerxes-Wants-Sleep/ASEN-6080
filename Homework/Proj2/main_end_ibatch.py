@@ -1,0 +1,345 @@
+import argparse
+import numpy as np
+import pandas as pd
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from src.Functions.batch import batch_estimate_x0
+from src.Functions.propagation import PropSettings
+from src.Functions.stations import Stations
+from src.Functions.srp_dyn_model import mu_sun_srp_state_deriv
+from src.Functions.jacobians import srp_thirdbody_variational_eq
+from src.Functions.Ephem import ephem
+from src.helpers.plotting.post_processing import run_filter_post_processing
+from src.helpers.plotting.plot_postfit_residuals_linear import make_postfit_residuals_linear_plot
+from src.helpers.plotting.plot_state_estimate_3sigma import make_all_state_3sigma_envelope_plot
+
+
+def build_stations():
+    theta0_deg = 0
+    w_earth_rad_per_s = 7.29211585275553e-5
+    radius_earth_km = 6378.1363
+
+    return [
+        Stations(
+            "DSS 34",
+            lat_deg=-35.398333,
+            lon_deg=148.981944,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km + 0.691750,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+        Stations(
+            "DSS 65",
+            lat_deg=40.427222,
+            lon_deg=355.749444,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km + 0.834539,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+        Stations(
+            "DSS 13",
+            lat_deg=35.247164,
+            lon_deg=243.205000,
+            theta0_deg=theta0_deg,
+            radius_earth=radius_earth_km + 1.07114904,
+            w_earth_rad_per_s=w_earth_rad_per_s,
+        ),
+    ]
+
+
+def build_problem_constants():
+    Jd0 = 2456296.25
+    mu_sun = 132712440017.987
+    AU_km = 149597870.7
+    solar_flux_W_m2 = 1357.0
+    SRP_area_mass_ratio = 0.01
+
+    pConst = type("pConst", (), {})()
+    pConst.mu_earth = 398600.4415
+    pConst.mu_sun = mu_sun
+
+    scConst = type("scConst", (), {})()
+    scConst.area = SRP_area_mass_ratio
+    scConst.mass = 1.0
+    scConst.solar_flux_1au = solar_flux_W_m2
+    scConst.c = 299792458.0
+    scConst.AU_m = AU_km * 1000.0
+
+    def earth_state_func(tau):
+        return np.zeros(3, dtype=float), np.zeros(3, dtype=float)
+
+    def sun_state_func(tau):
+        jd = Jd0 + float(tau) / 86400.0
+        rE_km, vE_km_s, _ = ephem(jd, 3, frame="EME2000")
+        rE_km = np.asarray(rE_km, dtype=float).reshape(3,)
+        vE_km_s = np.asarray(vE_km_s, dtype=float).reshape(3,)
+        return -rE_km, -vE_km_s
+
+    return pConst, scConst, earth_state_func, sun_state_func
+
+
+def build_dyn_and_jac(pConst, scConst, earth_state_func, sun_state_func):
+    dyn = lambda tau, x: mu_sun_srp_state_deriv(
+        t=tau,
+        X=x,
+        pConst=pConst,
+        scConst=scConst,
+        earth_state_func=earth_state_func,
+        sun_state_func=sun_state_func,
+    )
+
+    def jac(tau, x):
+        x = np.asarray(x, dtype=float).reshape(-1)
+        r_earth, _ = earth_state_func(tau)
+        r_sun, _ = sun_state_func(tau)
+        return srp_thirdbody_variational_eq(
+            r_sc=x[0:3],
+            r_earth=r_earth,
+            r_sun=r_sun,
+            Cr=float(x[6]),
+            area=scConst.area,
+            mass=scConst.mass,
+            mu_earth=pConst.mu_earth,
+            mu_i=pConst.mu_sun,
+            solar_flux_1au=scConst.solar_flux_1au,
+            c=scConst.c,
+            AU_m=scConst.AU_m,
+        )
+
+    return dyn, jac
+
+
+def load_project2_obs(obs_path: Path) -> list[dict]:
+    df = pd.read_csv(
+        obs_path,
+        skipinitialspace=True,
+        index_col=False,
+        usecols=range(7),
+    )
+    df.columns = [c.strip() for c in df.columns]
+
+    col_time = "Time since Epoch"
+    station_cols = {
+        "DSS 34": ("DSS34 Range (km)", "DSS34 Range-Rate (km/sec)"),
+        "DSS 65": ("DSS65 Range (km)", "DSS65 Range-Rate (km/sec)"),
+        "DSS 13": ("DSS13 Range (km)", "DSS13 Range-Rate (km/sec)"),
+    }
+
+    pieces = []
+    for st_name, (rho_col, rhod_col) in station_cols.items():
+        part = df[[col_time, rho_col, rhod_col]].rename(
+            columns={
+                col_time: "t",
+                rho_col: "rho_km",
+                rhod_col: "rho_dot_km_s",
+            }
+        )
+        part["station"] = st_name
+        pieces.append(part)
+
+    meas = pd.concat(pieces, ignore_index=True)
+    meas["t"] = pd.to_numeric(meas["t"], errors="coerce")
+    meas["rho_km"] = pd.to_numeric(meas["rho_km"], errors="coerce")
+    meas["rho_dot_km_s"] = pd.to_numeric(meas["rho_dot_km_s"], errors="coerce")
+    meas = meas.dropna(subset=["rho_km", "rho_dot_km_s"])
+    meas = meas.sort_values("t")[["station", "t", "rho_km", "rho_dot_km_s"]]
+    return meas.to_dict(orient="records")
+
+
+def load_newekf_history(history_path: Path) -> dict:
+    if not history_path.exists():
+        raise FileNotFoundError(
+            f"Missing IEKF history file: {history_path}\n"
+            "Run main_newekf.py first so it saves time-step state/covariance history."
+        )
+
+    data = np.load(history_path)
+    return {
+        "t_meas": np.asarray(data["t_meas"], dtype=float),
+        "station_meas": np.asarray(data["station_meas"]).astype(str).tolist(),
+        "xhat_meas": np.asarray(data["xhat_meas"], dtype=float),
+        "P_meas": np.asarray(data["P_meas"], dtype=float),
+    }
+
+
+def select_tail_measurements(all_meas: list[dict], tail_days: float):
+    t_all = np.array([float(m["t"]) for m in all_meas], dtype=float)
+    if t_all.size == 0:
+        raise ValueError("No measurements found in observation file.")
+    t_end = float(np.max(t_all))
+    t_start = max(0.0, t_end - float(tail_days) * 86400.0)
+    tail = [m for m in all_meas if float(m["t"]) >= (t_start - 1.0e-12)]
+    if len(tail) == 0:
+        raise ValueError("Tail selection produced no measurements.")
+    return tail, t_start, t_end
+
+
+def seed_from_iekf_history(history: dict, t_seed: float):
+    t_hist = np.asarray(history["t_meas"], dtype=float)
+    x_hist = np.asarray(history["xhat_meas"], dtype=float)
+    P_hist = np.asarray(history["P_meas"], dtype=float)
+
+    idx = int(np.searchsorted(t_hist, t_seed - 1.0e-12, side="left"))
+    if idx >= t_hist.size:
+        idx = t_hist.size - 1
+
+    if not np.isclose(t_hist[idx], t_seed, rtol=0.0, atol=1.0e-7):
+        idx_near = int(np.argmin(np.abs(t_hist - t_seed)))
+        if abs(float(t_hist[idx_near]) - float(t_seed)) > 1.0:
+            raise ValueError(
+                "Could not align IEKF history with tail-arc start time. "
+                "Re-run main_newekf.py on the same obs file."
+            )
+        idx = idx_near
+
+    x0_bar = np.asarray(x_hist[idx], dtype=float).copy()
+    P0 = np.asarray(P_hist[idx], dtype=float).copy()
+    if not np.all(np.isfinite(x0_bar)) or not np.all(np.isfinite(P0)):
+        raise ValueError("Seed state/covariance from IEKF history contains non-finite values.")
+    return x0_bar, P0, idx, float(t_hist[idx])
+
+
+def batch_info_to_filter_like_out(info: dict, R_km: np.ndarray) -> dict:
+    xhat = np.asarray(info["state_hist"], dtype=float)
+    P = np.asarray(info["P_hist"], dtype=float)
+    two_sigma = 2.0 * np.sqrt(np.maximum(np.diagonal(P, axis1=1, axis2=2), 0.0))
+
+    prefit = np.asarray(info.get("prefit_residuals", np.full((xhat.shape[0], 2), np.nan)), dtype=float)
+    postfit_nl = np.asarray(info.get("postfit_residuals", np.full((xhat.shape[0], 2), np.nan)), dtype=float)
+
+    postfit_lin = None
+    if "postfit_resids_linear_hist" in info and len(info["postfit_resids_linear_hist"]) > 0:
+        postfit_lin = np.asarray(info["postfit_resids_linear_hist"][-1], dtype=float)
+    if postfit_lin is None:
+        postfit_lin = postfit_nl.copy()
+
+    return {
+        "t_meas": np.asarray(info["t_meas"], dtype=float),
+        "station_meas": list(info["station_meas"]),
+        "xhat_meas": xhat,
+        "Xhat_meas": xhat,
+        "P_meas": P,
+        "two_sigma_meas": two_sigma,
+        "prefit_resids_final": prefit,
+        "postfit_resids_linear_final": postfit_lin,
+        "postfit_resids_meas": postfit_nl,
+        "state_error_meas": None,
+        "R": np.asarray(R_km, dtype=float),
+        "rms_final": None,
+        "rms_by_iter": None,
+    }
+
+
+def to_plotting_result_6state_from_filter_km(out: dict, *, R_km: np.ndarray):
+    xhat = np.asarray(out["xhat_meas"], dtype=float)
+    P = np.asarray(out["P_meas"], dtype=float)
+
+    xhat6_m = xhat[:, 0:6] * 1000.0
+    P6_m = P[:, 0:6, 0:6] * (1000.0**2)
+    two_sigma6_m = 2.0 * np.sqrt(np.maximum(np.diagonal(P6_m, axis1=1, axis2=2), 0.0))
+
+    d = {
+        "t_meas": np.asarray(out["t_meas"], dtype=float),
+        "station_meas": list(out["station_meas"]),
+        "xhat_meas": xhat6_m,
+        "Xhat_meas": xhat6_m,
+        "P_meas": P6_m,
+        "two_sigma_meas": two_sigma6_m,
+        "state_error_meas": None,
+        "prefit_resids_final": np.asarray(out["prefit_resids_final"], dtype=float) * 1000.0,
+        "postfit_resids_linear_final": np.asarray(out["postfit_resids_linear_final"], dtype=float) * 1000.0,
+        "postfit_resids_meas": np.asarray(out["postfit_resids_meas"], dtype=float) * 1000.0,
+        "rms_final": out.get("rms_final", {}),
+        "rms_by_iter": out.get("rms_by_iter", None),
+        "R": np.asarray(R_km, dtype=float) * (1000.0**2),
+    }
+    return run_filter_post_processing(out=d)
+
+
+def make_tail_plot_set(out: dict, outdir: Path, *, R_km: np.ndarray):
+    outdir.mkdir(parents=True, exist_ok=True)
+    postfit_plot_out = to_plotting_result_6state_from_filter_km(out, R_km=R_km)
+    make_postfit_residuals_linear_plot(postfit_plot_out, outdir)
+    make_all_state_3sigma_envelope_plot(out, outdir)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run iterated batch on the last N days of Project2b data.")
+    parser.add_argument("--tail-days", type=float, default=20.0, help="Number of trailing days to batch over.")
+    parser.add_argument("--max-iter", type=int, default=10, help="Max batch iterations.")
+    parser.add_argument("--tol", type=float, default=1.0e-8, help="Batch convergence tolerance.")
+    parser.add_argument(
+        "--history-path",
+        type=str,
+        default=str(Path(__file__).resolve().parent / "Plots" / "New EKF" / "newekf_history_for_end_batch.npz"),
+        help="Path to saved IEKF history from main_newekf.py",
+    )
+    args = parser.parse_args()
+
+    base = Path(__file__).resolve().parent
+    obs_path = base / "Given_data" / "Project2b_Obs.txt"
+    all_meas = load_project2_obs(obs_path)
+
+    tail_meas, t_start, t_end = select_tail_measurements(all_meas, tail_days=args.tail_days)
+    t_seed = float(tail_meas[0]["t"])
+
+    history = load_newekf_history(Path(args.history_path))
+    x0_bar, P0, idx_seed, t_seed_hist = seed_from_iekf_history(history, t_seed=t_seed)
+
+    stations = build_stations()
+    pConst, scConst, earth_state_func, sun_state_func = build_problem_constants()
+    dyn_fun, dyn_jac = build_dyn_and_jac(pConst, scConst, earth_state_func, sun_state_func)
+
+    sigma_rho_km = 5.0e-3
+    sigma_rhod_km_s = 0.5e-6
+    R_batch = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
+
+    x0_hat, P0_hat, info = batch_estimate_x0(
+        all_meas=tail_meas,
+        stations=stations,
+        x0_bar=x0_bar,
+        P0=P0,
+        R=R_batch,
+        mu=398600.4415,
+        J2=0.0,
+        J3=0.0,
+        Re=6378.1363,
+        max_iter=int(args.max_iter),
+        tol=float(args.tol),
+        reltol=1.0e-10,
+        abstol=1.0e-10,
+        method="RK45",
+        dyn_fun=dyn_fun,
+        dyn_jac=dyn_jac,
+        prop_settings=PropSettings(rtol=1.0e-10, atol=1.0e-10, method="RK45"),
+    )
+    out = batch_info_to_filter_like_out(info, R_km=R_batch)
+
+    day0 = float(info["t_meas"][0]) / 86400.0
+    day1 = float(info["t_meas"][-1]) / 86400.0
+    outdir = base / "Plots" / "End IBatch" / f"Days_{int(np.floor(day0)):03d}_{int(np.ceil(day1)):03d}"
+    make_tail_plot_set(out, outdir, R_km=R_batch)
+
+    xf = np.asarray(out["xhat_meas"][-1], dtype=float).reshape(-1)
+    print("\nEnd-Arc Iterated Batch Complete.")
+    print(f"  Tail Days Requested          : {args.tail_days:.3f}")
+    print(f"  Tail Time Window [days]      : {t_start/86400.0:.6f} -> {t_end/86400.0:.6f}")
+    print(f"  Seed Measurement Time [days] : {t_seed/86400.0:.6f}")
+    print(f"  Seed Matched History Index   : {idx_seed}")
+    print(f"  Seed Matched Time [days]     : {t_seed_hist/86400.0:.6f}")
+    print(f"  Batch Iterations             : {info.get('num_iters', 'n/a')}")
+    print("\nFinal State Estimate (End-Arc Iterated Batch):")
+    print(f"  Position [km]    : [{xf[0]:.6f}, {xf[1]:.6f}, {xf[2]:.6f}]")
+    print(f"  Velocity [km/s]  : [{xf[3]:.9f}, {xf[4]:.9f}, {xf[5]:.9f}]")
+    print(f"  Cr [-]           : {xf[6]:.9f}")
+    print(f"\nSaved End-Arc Iterated Batch Plots To: {outdir}")
+    print(f"History Seed Source: {Path(args.history_path).resolve()}")
+
+
+if __name__ == "__main__":
+    main()
