@@ -63,7 +63,7 @@ def H_range_rangerate_man_estimate(R, V, Rs, Vs, eps=1e-12):
     v = V - Vs
 
     rho = np.linalg.norm(r)
-    rho_hat = r / rho
+    rho_hat = r / rho    
     rhod = np.dot(r, v) / rho
 
     # Partials

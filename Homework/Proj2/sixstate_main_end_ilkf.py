@@ -1,4 +1,5 @@
 import argparse
+import json
 import numpy as np
 import pandas as pd
 import sys
@@ -123,19 +124,29 @@ def load_project2_obs(obs_path: Path) -> list[dict]:
     return meas.to_dict(orient="records")
 
 
-def load_newekf_history(history_path: Path) -> dict:
+def load_maneuver_iekf_histories(history_path: Path) -> dict:
     if not history_path.exists():
         raise FileNotFoundError(
-            f"Missing six-state IEKF history file: {history_path}\n"
-            "Run sixstate_main_newekf.py first so it saves time-step state/covariance history."
+            f"Missing maneuver IEKF history file: {history_path}\n"
+            "Run main_maneuver_check.py first so it saves forward/smoothed history."
         )
 
     data = np.load(history_path)
-    return {
+    out = {
         "t_meas": np.asarray(data["t_meas"], dtype=float),
-        "xhat_meas": np.asarray(data["xhat_meas"], dtype=float),
-        "P_meas": np.asarray(data["P_meas"], dtype=float),
+        "forward": {
+            "xhat_meas": np.asarray(data["xhat_meas"], dtype=float),
+            "P_meas": np.asarray(data["P_meas"], dtype=float),
+        },
     }
+    if ("xhat_smooth" in data) and ("P_smooth" in data):
+        out["smoothed"] = {
+            "xhat_meas": np.asarray(data["xhat_smooth"], dtype=float),
+            "P_meas": np.asarray(data["P_smooth"], dtype=float),
+        }
+    else:
+        out["smoothed"] = None
+    return out
 
 
 def select_tail_measurements(all_meas: list[dict], tail_days: float):
@@ -170,13 +181,17 @@ def seed_from_iekf_history(history: dict, t_seed: float):
 
     x0_star = np.asarray(x_hist[idx], dtype=float).copy()
     P0 = np.asarray(P_hist[idx], dtype=float).copy()
-    if x0_star.shape[0] != 6:
-        raise ValueError(f"Expected 6-state seed from history, got shape {x0_star.shape}.")
-    if P0.shape != (6, 6):
-        raise ValueError(f"Expected 6x6 seed covariance from history, got shape {P0.shape}.")
-    if not np.all(np.isfinite(x0_star)) or not np.all(np.isfinite(P0)):
+    if x0_star.shape[0] < 6:
+        raise ValueError(f"Expected at least 6 states in seed history, got shape {x0_star.shape}.")
+    if P0.shape[0] < 6 or P0.shape[1] < 6:
+        raise ValueError(f"Expected covariance with at least 6x6 block, got shape {P0.shape}.")
+
+    x0_star_6 = np.asarray(x0_star[:6], dtype=float).copy()
+    P0_6 = np.asarray(P0[:6, :6], dtype=float).copy()
+
+    if not np.all(np.isfinite(x0_star_6)) or not np.all(np.isfinite(P0_6)):
         raise ValueError("Seed state/covariance from IEKF history contains non-finite values.")
-    return x0_star, P0, idx, float(t_hist[idx])
+    return x0_star_6, P0_6, idx, float(t_hist[idx])
 
 
 def make_lkf_filter(
@@ -292,7 +307,9 @@ def make_smoothed_plot_out(forward_out: dict) -> dict | None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run six-state ILKF on the last N days of Project2b data.")
+    parser = argparse.ArgumentParser(
+        description="Run six-state end-arc ILKF twice using Maneuver IEKF forward and smoothed seeds."
+    )
     parser.add_argument("--tail-days", type=float, default=25.0, help="Number of trailing days to run ILKF over.")
     parser.add_argument("--max-iters", type=int, default=10, help="Maximum outer ILKF iterations.")
     parser.add_argument("--iter-tol", type=float, default=1.0e-10, help="Outer ILKF convergence tolerance on ||dX0||.")
@@ -311,8 +328,8 @@ def main():
     parser.add_argument(
         "--history-path",
         type=str,
-        default=str(Path(__file__).resolve().parent / "Plots" / "Sixstate New EKF" / "sixstate_newekf_history.npz"),
-        help="Path to saved six-state IEKF history from sixstate_main_newekf.py",
+        default=str(Path(__file__).resolve().parent / "Plots" / "Maneuver Check IEKF" / "maneuver_check_history.npz"),
+        help="Path to saved maneuver IEKF history from main_maneuver_check.py",
     )
     args = parser.parse_args()
 
@@ -323,8 +340,7 @@ def main():
     tail_meas, t_start, t_end = select_tail_measurements(all_meas, tail_days=args.tail_days)
     t_seed = float(tail_meas[0]["t"])
 
-    history = load_newekf_history(Path(args.history_path))
-    x0_star, P0, idx_seed, t_seed_hist = seed_from_iekf_history(history, t_seed=t_seed)
+    histories = load_maneuver_iekf_histories(Path(args.history_path))
 
     stations = build_stations()
     pConst, scConst, earth_state_func, sun_state_func = build_problem_constants()
@@ -339,65 +355,150 @@ def main():
     else:
         Q_lkf = np.diag([sigma_acc**2, sigma_acc**2, sigma_acc**2])
 
-    lkf = make_lkf_filter(
-        x0_star=x0_star,
-        P0=P0,
-        R=R_lkf,
-        Q=Q_lkf,
-        pConst=pConst,
-        scConst=scConst,
-        earth_state_func=earth_state_func,
-        sun_state_func=sun_state_func,
-        cr_fixed=float(args.cr_fixed),
-    )
+    def run_case(seed_label: str, history_seed: dict):
+        x0_star, P0, idx_seed, t_seed_hist = seed_from_iekf_history(history_seed, t_seed=t_seed)
 
-    out = lkf.run_iterated(
-        all_meas=tail_meas,
-        stations=stations,
-        Xtrue_meas=None,
-        max_iters=int(args.max_iters),
-        iter_tol=float(args.iter_tol),
-        show_progress=False,
-        progress_every=50,
-        verbose=True,
-    )
+        lkf = make_lkf_filter(
+            x0_star=x0_star,
+            P0=P0,
+            R=R_lkf,
+            Q=Q_lkf,
+            pConst=pConst,
+            scConst=scConst,
+            earth_state_func=earth_state_func,
+            sun_state_func=sun_state_func,
+            cr_fixed=float(args.cr_fixed),
+        )
 
-    # LKF18 run_iterated already includes RTS-smoothed histories (Xhat_smooth/P_smooth).
-    # Keep compatibility with paths that expose an explicit smooth() API.
-    if hasattr(lkf, "smooth"):
-        lkf.smooth(run_out=out, stations=stations)
-    out_smooth = make_smoothed_plot_out(out)
+        out = lkf.run_iterated(
+            all_meas=tail_meas,
+            stations=stations,
+            Xtrue_meas=None,
+            max_iters=int(args.max_iters),
+            iter_tol=float(args.iter_tol),
+            show_progress=False,
+            progress_every=50,
+            verbose=True,
+        )
 
-    day0 = float(out["t_meas"][0]) / 86400.0
-    day1 = float(out["t_meas"][-1]) / 86400.0
-    outdir = base / "Plots" / "End ILKF Sixstate" / f"Days_{int(np.floor(day0)):03d}_{int(np.ceil(day1)):03d}"
-    outdir_smooth = outdir / "Smoothed"
-    make_tail_plot_set(out, outdir, R_km=R_lkf)
-    if out_smooth is not None:
-        make_tail_plot_set(out_smooth, outdir_smooth, R_km=R_lkf)
+        if hasattr(lkf, "smooth"):
+            lkf.smooth(run_out=out, stations=stations)
+        out_smooth = make_smoothed_plot_out(out)
 
-    xf = np.asarray(out["xhat_meas"][-1], dtype=float).reshape(-1)
-    print("\nEnd-Arc Six-State ILKF Complete.")
-    print(f"  Tail Days Requested          : {args.tail_days:.3f}")
-    print(f"  Tail Time Window [days]      : {t_start/86400.0:.6f} -> {t_end/86400.0:.6f}")
-    print(f"  Seed Measurement Time [days] : {t_seed/86400.0:.6f}")
-    print(f"  Seed Matched History Index   : {idx_seed}")
-    print(f"  Seed Matched Time [days]     : {t_seed_hist/86400.0:.6f}")
-    print(f"  ILKF Iterations Used         : {out.get('iter_count', 'n/a')}")
-    print(f"  ILKF Converged               : {out.get('iter_converged', 'n/a')}")
-    print("\nFinal State Estimate (End-Arc Six-State ILKF):")
-    print(f"  Position [km]    : [{xf[0]:.6f}, {xf[1]:.6f}, {xf[2]:.6f}]")
-    print(f"  Velocity [km/s]  : [{xf[3]:.9f}, {xf[4]:.9f}, {xf[5]:.9f}]")
-    print(f"  Fixed Cr [-]     : {float(args.cr_fixed):.9f}")
-    if out_smooth is not None:
-        xfs = np.asarray(out_smooth["xhat_meas"][-1], dtype=float).reshape(-1)
-        print("\nFinal State Estimate (Smoothed End-Arc Six-State ILKF):")
-        print(f"  Position [km]    : [{xfs[0]:.6f}, {xfs[1]:.6f}, {xfs[2]:.6f}]")
-        print(f"  Velocity [km/s]  : [{xfs[3]:.9f}, {xfs[4]:.9f}, {xfs[5]:.9f}]")
+        day0 = float(out["t_meas"][0]) / 86400.0
+        day1 = float(out["t_meas"][-1]) / 86400.0
+        outdir = (
+            base
+            / "Plots"
+            / "End ILKF Sixstate"
+            / f"{seed_label}"
+            / f"Days_{int(np.floor(day0)):03d}_{int(np.ceil(day1)):03d}"
+        )
+        outdir_smooth = outdir / "Smoothed"
+        make_tail_plot_set(out, outdir, R_km=R_lkf)
+        if out_smooth is not None:
+            make_tail_plot_set(out_smooth, outdir_smooth, R_km=R_lkf)
+
+        xf = np.asarray(out["xhat_meas"][-1], dtype=float).reshape(-1)
+        Pf = np.asarray(out["P_meas"][-1], dtype=float)
+        tf = float(np.asarray(out["t_meas"], dtype=float)[-1])
+        xfs = None
+        Pfs = None
+        tfs = None
+        if out_smooth is not None:
+            xfs = np.asarray(out_smooth["xhat_meas"][-1], dtype=float).reshape(-1)
+            Pfs = np.asarray(out_smooth["P_meas"][-1], dtype=float)
+            tfs = float(np.asarray(out_smooth["t_meas"], dtype=float)[-1])
+
+        print(f"\nEnd-Arc Six-State ILKF Complete ({seed_label}).")
+        print(f"  Tail Days Requested          : {args.tail_days:.3f}")
+        print(f"  Tail Time Window [days]      : {t_start/86400.0:.6f} -> {t_end/86400.0:.6f}")
+        print(f"  Seed Measurement Time [days] : {t_seed/86400.0:.6f}")
+        print(f"  Seed Matched History Index   : {idx_seed}")
+        print(f"  Seed Matched Time [days]     : {t_seed_hist/86400.0:.6f}")
+        print(f"  ILKF Iterations Used         : {out.get('iter_count', 'n/a')}")
+        print(f"  ILKF Converged               : {out.get('iter_converged', 'n/a')}")
+        print(f"\nFinal State Estimate ({seed_label} seed, End-Arc Six-State ILKF):")
+        print(f"  Position [km]    : [{xf[0]:.6f}, {xf[1]:.6f}, {xf[2]:.6f}]")
+        print(f"  Velocity [km/s]  : [{xf[3]:.9f}, {xf[4]:.9f}, {xf[5]:.9f}]")
         print(f"  Fixed Cr [-]     : {float(args.cr_fixed):.9f}")
-    print(f"\nSaved End-Arc Six-State ILKF Plots To: {outdir}")
-    if out_smooth is not None:
-        print(f"Saved Smoothed End-Arc Six-State ILKF Plots To: {outdir_smooth}")
+        if xfs is not None:
+            print(f"\nFinal State Estimate (Smoothed {seed_label} seed End-Arc Six-State ILKF):")
+            print(f"  Position [km]    : [{xfs[0]:.6f}, {xfs[1]:.6f}, {xfs[2]:.6f}]")
+            print(f"  Velocity [km/s]  : [{xfs[3]:.9f}, {xfs[4]:.9f}, {xfs[5]:.9f}]")
+            print(f"  Fixed Cr [-]     : {float(args.cr_fixed):.9f}")
+        print(f"\nSaved End-Arc Six-State ILKF Plots To: {outdir}")
+        if out_smooth is not None:
+            print(f"Saved Smoothed End-Arc Six-State ILKF Plots To: {outdir_smooth}")
+
+        return {
+            "out": out,
+            "out_smooth": out_smooth,
+            "final_forward": xf,
+            "final_cov_forward": Pf,
+            "final_time_s_forward": tf,
+            "final_smoothed": xfs,
+            "final_cov_smoothed": Pfs,
+            "final_time_s_smoothed": tfs,
+            "plot_dir": outdir,
+        }
+
+    # Run with forward seed from maneuver IEKF history
+    hist_forward = {
+        "t_meas": histories["t_meas"],
+        "xhat_meas": histories["forward"]["xhat_meas"],
+        "P_meas": histories["forward"]["P_meas"],
+    }
+    case_forward = run_case("Seed_ForwardIEKF", hist_forward)
+
+    # Run with smoothed seed from maneuver IEKF history
+    if histories["smoothed"] is None:
+        raise ValueError(
+            "Smoothed maneuver IEKF history not found in history file. "
+            "Re-run main_maneuver_check.py so it saves xhat_smooth/P_smooth."
+        )
+    hist_smoothed = {
+        "t_meas": histories["t_meas"],
+        "xhat_meas": histories["smoothed"]["xhat_meas"],
+        "P_meas": histories["smoothed"]["P_meas"],
+    }
+    case_smoothed = run_case("Seed_SmoothedIEKF", hist_smoothed)
+
+    final_json = base / "Plots" / "End ILKF Sixstate" / "final_states_maneuver_seed_comparison.json"
+    final_json.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "history_source": str(Path(args.history_path).resolve()),
+        "tail_days": float(args.tail_days),
+        "units": {
+            "state": "[km, km, km, km/s, km/s, km/s]",
+            "covariance": "km-based full-state covariance; position variances in km^2, velocity variances in (km/s)^2, and cross terms in consistent mixed units",
+            "time": "seconds since epoch",
+        },
+        "seed_forward_iekf": {
+            "final_state_ilkf_forward": case_forward["final_forward"].tolist(),
+            "final_cov_ilkf_forward": case_forward["final_cov_forward"].tolist(),
+            "final_cov_ilkf_forward_full_km": case_forward["final_cov_forward"].tolist(),
+            "final_time_s_ilkf_forward": case_forward["final_time_s_forward"],
+            "final_state_ilkf_smoothed": None if case_forward["final_smoothed"] is None else case_forward["final_smoothed"].tolist(),
+            "final_cov_ilkf_smoothed": None if case_forward["final_cov_smoothed"] is None else case_forward["final_cov_smoothed"].tolist(),
+            "final_cov_ilkf_smoothed_full_km": None if case_forward["final_cov_smoothed"] is None else case_forward["final_cov_smoothed"].tolist(),
+            "final_time_s_ilkf_smoothed": case_forward["final_time_s_smoothed"],
+        },
+        "seed_smoothed_iekf": {
+            "final_state_ilkf_forward": case_smoothed["final_forward"].tolist(),
+            "final_cov_ilkf_forward": case_smoothed["final_cov_forward"].tolist(),
+            "final_cov_ilkf_forward_full_km": case_smoothed["final_cov_forward"].tolist(),
+            "final_time_s_ilkf_forward": case_smoothed["final_time_s_forward"],
+            "final_state_ilkf_smoothed": None if case_smoothed["final_smoothed"] is None else case_smoothed["final_smoothed"].tolist(),
+            "final_cov_ilkf_smoothed": None if case_smoothed["final_cov_smoothed"] is None else case_smoothed["final_cov_smoothed"].tolist(),
+            "final_cov_ilkf_smoothed_full_km": None if case_smoothed["final_cov_smoothed"] is None else case_smoothed["final_cov_smoothed"].tolist(),
+            "final_time_s_ilkf_smoothed": case_smoothed["final_time_s_smoothed"],
+        },
+    }
+    with open(final_json, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    print(f"\nSaved labeled final-state comparison JSON to: {final_json}")
     print(f"History Seed Source: {Path(args.history_path).resolve()}")
 
 

@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from src.Functions.itekf_2 import IEKF2
+from src.Functions.iekf_maneuver_check import IEKF2
 from src.Functions.propagation import PropSettings
 from src.Functions.stations import Stations
 from src.Functions.srp_dyn_model_6_state import mu_sun_srp_state_deriv_for6state
@@ -52,7 +52,7 @@ def build_stations():
     ]
 
 
-x0_sixstate_newekf = np.array(
+x0_fpsmooth_iekf = np.array(
     [
         -274096770.76544,
         -92859266.4499061,
@@ -63,7 +63,7 @@ x0_sixstate_newekf = np.array(
     ],
     dtype=float,
 )
-P0_sixstate_newekf = np.diag(
+P0_fpsmooth_iekf = np.diag(
     [
         100.0**2,
         100.0**2,
@@ -189,26 +189,26 @@ def make_standard_plot_set(out: dict, outdir: Path, *, R_km: np.ndarray):
     make_all_state_3sigma_envelope_plot(out, outdir)
 
 
-def make_smoothed_plot_out(forward_out: dict) -> dict | None:
-    if ("Xhat_smooth" not in forward_out) or ("P_smooth" not in forward_out):
+def make_fp_smoothed_plot_out(forward_out: dict) -> dict | None:
+    if ("Xhat_smooth_fp" not in forward_out) or ("P_smooth_fp" not in forward_out):
         return None
 
     out_s = dict(forward_out)
-    out_s["xhat_meas"] = np.asarray(forward_out["Xhat_smooth"], dtype=float)
-    out_s["Xhat_meas"] = np.asarray(forward_out["Xhat_smooth"], dtype=float)
-    out_s["P_meas"] = np.asarray(forward_out["P_smooth"], dtype=float)
+    out_s["xhat_meas"] = np.asarray(forward_out["Xhat_smooth_fp"], dtype=float)
+    out_s["Xhat_meas"] = np.asarray(forward_out["Xhat_smooth_fp"], dtype=float)
+    out_s["P_meas"] = np.asarray(forward_out["P_smooth_fp"], dtype=float)
     out_s["P_pf"] = out_s["P_meas"].reshape(out_s["P_meas"].shape[0], -1, order="F")
     out_s["two_sigma_meas"] = np.asarray(
-        forward_out.get("two_sigma_smooth", np.full_like(out_s["xhat_meas"], np.nan)),
+        forward_out.get("two_sigma_smooth_fp", np.full_like(out_s["xhat_meas"], np.nan)),
         dtype=float,
     )
-    out_s["state_error_meas"] = forward_out.get("state_error_smooth_meas", None)
+    out_s["state_error_meas"] = forward_out.get("state_error_smooth_fp", None)
     out_s["postfit_resids_linear_final"] = np.asarray(
-        forward_out.get("postfit_resids_linear_smooth", np.full((out_s["xhat_meas"].shape[0], 2), np.nan)),
+        forward_out.get("postfit_resids_linear_smooth_fp", np.full((out_s["xhat_meas"].shape[0], 2), np.nan)),
         dtype=float,
     )
     out_s["postfit_resids_meas"] = np.asarray(
-        forward_out.get("postfit_resids_smooth_nl", out_s["postfit_resids_linear_final"]),
+        forward_out.get("postfit_resids_smooth_fp", out_s["postfit_resids_linear_final"]),
         dtype=float,
     )
     return out_s
@@ -219,6 +219,44 @@ def make_smoothed_plot_set(out_smooth: dict, outdir: Path, *, R_km: np.ndarray):
     result = to_plotting_result_6state_from_filter_km(out_smooth, R_km=R_km)
     make_postfit_residuals_linear_plot(result, outdir)
     make_all_state_3sigma_envelope_plot(out_smooth, outdir)
+
+
+def print_postfit_3sigma_coverage(out: dict, R_km: np.ndarray, *, label: str):
+    """
+    Print percent of postfit residuals within +/-3 sigma bounds.
+    Uses linear postfits when available.
+    """
+    postfit = out.get("postfit_resids_linear_final", None)
+    if postfit is None:
+        postfit = out.get("postfit_resids_meas", None)
+    if postfit is None:
+        print(f"{label}: no postfit residuals available for 3-sigma coverage.")
+        return
+
+    pf = np.asarray(postfit, dtype=float)
+    if pf.ndim != 2 or pf.shape[1] < 2:
+        print(f"{label}: postfit residual shape invalid for 3-sigma coverage: {pf.shape}")
+        return
+
+    R = np.asarray(R_km, dtype=float)
+    sig_rho = float(np.sqrt(max(R[0, 0], 0.0)))
+    sig_rhod = float(np.sqrt(max(R[1, 1], 0.0)))
+    b_rho = 3.0 * sig_rho
+    b_rhod = 3.0 * sig_rhod
+
+    valid_rho = np.isfinite(pf[:, 0])
+    valid_rhod = np.isfinite(pf[:, 1])
+    in_rho = valid_rho & (np.abs(pf[:, 0]) <= b_rho)
+    in_rhod = valid_rhod & (np.abs(pf[:, 1]) <= b_rhod)
+
+    n_rho = int(np.sum(valid_rho))
+    n_rhod = int(np.sum(valid_rhod))
+    pct_rho = (100.0 * float(np.sum(in_rho)) / n_rho) if n_rho > 0 else np.nan
+    pct_rhod = (100.0 * float(np.sum(in_rhod)) / n_rhod) if n_rhod > 0 else np.nan
+
+    print(f"\n{label} 3-sigma postfit coverage:")
+    print(f"  Range       : {pct_rho:6.2f}% ({int(np.sum(in_rho))}/{n_rho}) within +/-3σ")
+    print(f"  Range-Rate  : {pct_rhod:6.2f}% ({int(np.sum(in_rhod))}/{n_rhod}) within +/-3σ")
 
 
 def slice_out_by_day_window(out: dict, day_start: float, day_end: float, *, include_start: bool) -> dict | None:
@@ -280,12 +318,12 @@ def main():
 
     sigma_rho_km = 5.0e-3
     sigma_rhod_km_s = 0.5e-6
-    R_sixstate = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
+    R_iekf = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
 
-    sigma_acc_km_s2 = 1.0e-8 #SNC
-    Q_sixstate = np.diag([sigma_acc_km_s2**2, sigma_acc_km_s2**2, sigma_acc_km_s2**2])
+    sigma_acc_km_s2 = 1.0e-8
+    Q_iekf = np.diag([sigma_acc_km_s2**2, sigma_acc_km_s2**2, sigma_acc_km_s2**2])
 
-    dyn_sixstate = lambda tau, x: mu_sun_srp_state_deriv_for6state(
+    dyn_6 = lambda tau, x: mu_sun_srp_state_deriv_for6state(
         t=tau,
         X=x,
         pConst=pConst,
@@ -295,7 +333,7 @@ def main():
         sun_state_func=sun_state_func,
     )
 
-    def jac_sixstate(tau, x):
+    def jac_6(tau, x):
         x = np.asarray(x, dtype=float).reshape(-1)
         r_earth, _ = earth_state_func(tau)
         r_sun, _ = sun_state_func(tau)
@@ -313,18 +351,18 @@ def main():
             AU_m=scConst.AU_m,
         )
 
-    sixstate_newekf = IEKF2(
-        x0=x0_sixstate_newekf,
-        P0=P0_sixstate_newekf,
-        R=R_sixstate,
-        Q=Q_sixstate,
-        dyn_fun=dyn_sixstate,
-        dyn_jac=jac_sixstate,
+    filt = IEKF2(
+        x0=x0_fpsmooth_iekf,
+        P0=P0_fpsmooth_iekf,
+        R=R_iekf,
+        Q=Q_iekf,
+        dyn_fun=dyn_6,
+        dyn_jac=jac_6,
         prop_settings=PropSettings(rtol=1.0e-10, atol=1.0e-10, method="RK45"),
         first_pass_gap_s=6 * 3600.0,
     )
 
-    out = sixstate_newekf.run(
+    out = filt.run(
         all_meas=all_meas,
         stations=stations,
         Xtrue_meas=None,
@@ -337,24 +375,31 @@ def main():
         show_progress=True,
         progress_every=50,
     )
-    print(f"Six-State New EKF (IEKF2, Fixed Cr={CR_FIXED:.3f}) Run Complete. Number Of Updates: {len(out['t_meas'])}")
-    sixstate_newekf.smooth(out, stations=stations)
-    out_smooth = make_smoothed_plot_out(out)
+    print(f"FP Smooth IEKF Forward Run Complete. Number Of Updates: {len(out['t_meas'])}")
 
-    plot_root = Path(__file__).resolve().parent / "Plots" / "Sixstate New EKF"
-    chunk_root = plot_root / "Chunks"
-    total_root = plot_root / "Total Run"
-    smooth_root = plot_root / "Smoothed Run"
+    filt.smooth_fraser_potter(out, stations=stations)
+    out_smooth = make_fp_smoothed_plot_out(out)
+
+    plot_root = Path(__file__).resolve().parent / "Plots" / "FP Smooth IEKF"
+    chunk_root = plot_root / "Chunks Forward"
+    chunk_smooth_root = plot_root / "Chunks Smoothed"
+    total_root = plot_root / "Total Forward"
+    smooth_root = plot_root / "Total Smoothed"
     chunk_root.mkdir(parents=True, exist_ok=True)
+    chunk_smooth_root.mkdir(parents=True, exist_ok=True)
     total_root.mkdir(parents=True, exist_ok=True)
     smooth_root.mkdir(parents=True, exist_ok=True)
 
-    history_path = plot_root / "sixstate_newekf_history.npz"
+    history_path = plot_root / "fpsmooth_iekf_history.npz"
     save_history(out, history_path)
 
-    make_standard_plot_set(out, total_root, R_km=R_sixstate)
+    make_standard_plot_set(out, total_root, R_km=R_iekf)
     if out_smooth is not None:
-        make_smoothed_plot_set(out_smooth, smooth_root, R_km=R_sixstate)
+        make_smoothed_plot_set(out_smooth, smooth_root, R_km=R_iekf)
+
+    print_postfit_3sigma_coverage(out, R_iekf, label="Forward IEKF")
+    if out_smooth is not None:
+        print_postfit_3sigma_coverage(out_smooth, R_iekf, label="FP-Smoothed IEKF")
 
     t_days = np.asarray(out["t_meas"], dtype=float) / 86400.0
     max_day = float(np.max(t_days))
@@ -373,7 +418,17 @@ def main():
             d0 = int(np.floor(day_start + 1.0e-9))
             d1 = int(np.ceil(day_end - 1.0e-9))
             chunk_dir = chunk_root / f"Days_{d0:03d}_{d1:03d}"
-            make_standard_plot_set(out_chunk, chunk_dir, R_km=R_sixstate)
+            make_standard_plot_set(out_chunk, chunk_dir, R_km=R_iekf)
+            if out_smooth is not None:
+                out_chunk_smooth = slice_out_by_day_window(
+                    out_smooth,
+                    day_start,
+                    day_end,
+                    include_start=(chunk_i == 1),
+                )
+                if out_chunk_smooth is not None:
+                    chunk_smooth_dir = chunk_smooth_root / f"Days_{d0:03d}_{d1:03d}"
+                    make_smoothed_plot_set(out_chunk_smooth, chunk_smooth_dir, R_km=R_iekf)
             print(
                 f"Saved Chunk {chunk_i:02d} Plots: Days {day_start:.3f} To {day_end:.3f} "
                 f"({len(out_chunk['t_meas'])} measurements)"
@@ -382,18 +437,18 @@ def main():
         chunk_i += 1
 
     xf = np.asarray(out["xhat_meas"][-1], dtype=float).reshape(-1)
-    print("\nFinal State Estimate (Six-State New EKF / IEKF2):")
+    print("\nFinal State Estimate (Forward IEKF):")
     print(f"  Position [km]    : [{xf[0]:.6f}, {xf[1]:.6f}, {xf[2]:.6f}]")
     print(f"  Velocity [km/s]  : [{xf[3]:.9f}, {xf[4]:.9f}, {xf[5]:.9f}]")
     print(f"  Fixed Cr [-]     : {CR_FIXED:.9f}")
     if out_smooth is not None:
         xfs = np.asarray(out_smooth["xhat_meas"][-1], dtype=float).reshape(-1)
-        print("\nFinal State Estimate (Smoothed Six-State New EKF / IEKF2):")
+        print("\nFinal State Estimate (Fraser-Potter Smoothed IEKF):")
         print(f"  Position [km]    : [{xfs[0]:.6f}, {xfs[1]:.6f}, {xfs[2]:.6f}]")
         print(f"  Velocity [km/s]  : [{xfs[3]:.9f}, {xfs[4]:.9f}, {xfs[5]:.9f}]")
         print(f"  Fixed Cr [-]     : {CR_FIXED:.9f}")
-    print(f"\nSaved Six-State New EKF Plots To: {plot_root}")
-    print(f"Saved Six-State New EKF Time-Step History To: {history_path}")
+    print(f"\nSaved FP Smooth IEKF Plots To: {plot_root}")
+    print(f"Saved FP Smooth IEKF Time-Step History To: {history_path}")
 
 
 if __name__ == "__main__":
