@@ -21,6 +21,8 @@ from src.helpers.plotting.plot_state_estimate_3sigma import make_all_state_3sigm
 
 CR_FIXED = 1.38
 MANEUVER_DAY_EST = 217
+ENABLE_PLOT_OUTLIER_MASK = True
+PLOT_OUTLIER_ABS_THRESHOLD_M = 700.0
 
 x0_maneuver = np.array(
     [
@@ -231,7 +233,11 @@ def drop_single_range_outlier_for_plot(out: dict, *, abs_threshold_m: float = 70
 
 def make_standard_plot_set(out: dict, outdir: Path, *, R_km: np.ndarray):
     outdir.mkdir(parents=True, exist_ok=True)
-    out_plot = drop_single_range_outlier_for_plot(out, abs_threshold_m=700.0)
+    out_plot = (
+        drop_single_range_outlier_for_plot(out, abs_threshold_m=PLOT_OUTLIER_ABS_THRESHOLD_M)
+        if ENABLE_PLOT_OUTLIER_MASK
+        else out
+    )
     result = to_plotting_result_6state_from_filter_km(out_plot, R_km=R_km)
     make_postfit_residuals_linear_plot(result, outdir)
     make_trace_cov_pos_vel_plot(result, outdir, length_unit="m")
@@ -265,7 +271,11 @@ def make_smoothed_plot_out(forward_out: dict) -> dict | None:
 
 def make_smoothed_plot_set(out_smooth: dict, outdir: Path, *, R_km: np.ndarray):
     outdir.mkdir(parents=True, exist_ok=True)
-    out_plot = drop_single_range_outlier_for_plot(out_smooth, abs_threshold_m=700.0)
+    out_plot = (
+        drop_single_range_outlier_for_plot(out_smooth, abs_threshold_m=PLOT_OUTLIER_ABS_THRESHOLD_M)
+        if ENABLE_PLOT_OUTLIER_MASK
+        else out_smooth
+    )
     result = to_plotting_result_6state_from_filter_km(out_plot, R_km=R_km)
     make_postfit_residuals_linear_plot(result, outdir)
     make_all_state_3sigma_envelope_plot(out_smooth, outdir)
@@ -423,8 +433,9 @@ def main():
     sigma_rhod_km_s = 0.5e-6
     R_man = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
 
-    sigma_acc_km_s2 = 1.0e-8 #SNC
+    sigma_acc_km_s2 = 1.0e-9 #SNC
     Q_man = np.diag([sigma_acc_km_s2**2, sigma_acc_km_s2**2, sigma_acc_km_s2**2])
+    # Q_man = np.zeros((9, 9), dtype=float)
 
     dyn_man = lambda tau, x: state_deriv_9state(
         t=tau,

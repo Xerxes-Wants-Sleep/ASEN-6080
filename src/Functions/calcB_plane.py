@@ -101,7 +101,7 @@ def calc_bplane(
     blkRot = np.eye(7)
     blkRot[0:3, 0:3] = ECI2STR
     blkRot[3:6, 3:6] = ECI2STR
-    blkRot[6, 6] = 1.0
+    blkRot[6, 6] = 0.0
 
     P_Bplane = blkRot @ P_Bplane @ blkRot.T
 

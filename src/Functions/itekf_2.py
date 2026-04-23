@@ -363,9 +363,9 @@ class IEKF2:
 
                         X_next = Xbar + eta_new
                         taken += 1
+                        max_iter = 500
                         residual_ok = np.all(np.abs(y_res) <= sigma_bounds)
-                        state_ok = np.linalg.norm(eta_new - eta) < float(iter_tol)
-                        if it > 0 and (residual_ok or state_ok):
+                        if residual_ok:
                             eta = eta_new
                             X_i = X_next
                             break

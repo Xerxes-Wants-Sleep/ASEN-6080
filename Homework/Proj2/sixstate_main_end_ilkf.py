@@ -128,25 +128,17 @@ def load_maneuver_iekf_histories(history_path: Path) -> dict:
     if not history_path.exists():
         raise FileNotFoundError(
             f"Missing maneuver IEKF history file: {history_path}\n"
-            "Run main_maneuver_check.py first so it saves forward/smoothed history."
+            "Run main_maneuver_check.py first so it saves forward history."
         )
 
     data = np.load(history_path)
-    out = {
+    return {
         "t_meas": np.asarray(data["t_meas"], dtype=float),
         "forward": {
             "xhat_meas": np.asarray(data["xhat_meas"], dtype=float),
             "P_meas": np.asarray(data["P_meas"], dtype=float),
         },
     }
-    if ("xhat_smooth" in data) and ("P_smooth" in data):
-        out["smoothed"] = {
-            "xhat_meas": np.asarray(data["xhat_smooth"], dtype=float),
-            "P_meas": np.asarray(data["P_smooth"], dtype=float),
-        }
-    else:
-        out["smoothed"] = None
-    return out
 
 
 def select_tail_measurements(all_meas: list[dict], tail_days: float):
@@ -308,15 +300,20 @@ def make_smoothed_plot_out(forward_out: dict) -> dict | None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run six-state end-arc ILKF twice using Maneuver IEKF forward and smoothed seeds."
+        description="Run six-state end-arc ILKF using Maneuver IEKF forward seed at end-minus-tail-days."
     )
-    parser.add_argument("--tail-days", type=float, default=25.0, help="Number of trailing days to run ILKF over.")
+    parser.add_argument(
+        "--tail-days",
+        type=float,
+        default=20.0,
+        help="Number of trailing days to run ILKF over (default: 20).",
+    )
     parser.add_argument("--max-iters", type=int, default=10, help="Maximum outer ILKF iterations.")
     parser.add_argument("--iter-tol", type=float, default=1.0e-10, help="Outer ILKF convergence tolerance on ||dX0||.")
     parser.add_argument(
         "--snc-accel",
         type=float,
-        default=1.0e-9,
+        default=1.0e-11,
         help="SNC acceleration sigma [km/s^2]. Use 0.0 for no SNC.",
     )
     parser.add_argument(
@@ -443,7 +440,7 @@ def main():
             "plot_dir": outdir,
         }
 
-    # Run with forward seed from maneuver IEKF history
+    # Run with forward seed from maneuver IEKF history at t_end - tail_days.
     hist_forward = {
         "t_meas": histories["t_meas"],
         "xhat_meas": histories["forward"]["xhat_meas"],
@@ -451,24 +448,12 @@ def main():
     }
     case_forward = run_case("Seed_ForwardIEKF", hist_forward)
 
-    # Run with smoothed seed from maneuver IEKF history
-    if histories["smoothed"] is None:
-        raise ValueError(
-            "Smoothed maneuver IEKF history not found in history file. "
-            "Re-run main_maneuver_check.py so it saves xhat_smooth/P_smooth."
-        )
-    hist_smoothed = {
-        "t_meas": histories["t_meas"],
-        "xhat_meas": histories["smoothed"]["xhat_meas"],
-        "P_meas": histories["smoothed"]["P_meas"],
-    }
-    case_smoothed = run_case("Seed_SmoothedIEKF", hist_smoothed)
-
     final_json = base / "Plots" / "End ILKF Sixstate" / "final_states_maneuver_seed_comparison.json"
     final_json.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "history_source": str(Path(args.history_path).resolve()),
         "tail_days": float(args.tail_days),
+        "seed_strategy": "forward_iekf_at_end_minus_tail_days",
         "units": {
             "state": "[km, km, km, km/s, km/s, km/s]",
             "covariance": "km-based full-state covariance; position variances in km^2, velocity variances in (km/s)^2, and cross terms in consistent mixed units",
@@ -483,16 +468,6 @@ def main():
             "final_cov_ilkf_smoothed": None if case_forward["final_cov_smoothed"] is None else case_forward["final_cov_smoothed"].tolist(),
             "final_cov_ilkf_smoothed_full_km": None if case_forward["final_cov_smoothed"] is None else case_forward["final_cov_smoothed"].tolist(),
             "final_time_s_ilkf_smoothed": case_forward["final_time_s_smoothed"],
-        },
-        "seed_smoothed_iekf": {
-            "final_state_ilkf_forward": case_smoothed["final_forward"].tolist(),
-            "final_cov_ilkf_forward": case_smoothed["final_cov_forward"].tolist(),
-            "final_cov_ilkf_forward_full_km": case_smoothed["final_cov_forward"].tolist(),
-            "final_time_s_ilkf_forward": case_smoothed["final_time_s_forward"],
-            "final_state_ilkf_smoothed": None if case_smoothed["final_smoothed"] is None else case_smoothed["final_smoothed"].tolist(),
-            "final_cov_ilkf_smoothed": None if case_smoothed["final_cov_smoothed"] is None else case_smoothed["final_cov_smoothed"].tolist(),
-            "final_cov_ilkf_smoothed_full_km": None if case_smoothed["final_cov_smoothed"] is None else case_smoothed["final_cov_smoothed"].tolist(),
-            "final_time_s_ilkf_smoothed": case_smoothed["final_time_s_smoothed"],
         },
     }
     with open(final_json, "w", encoding="utf-8") as f:

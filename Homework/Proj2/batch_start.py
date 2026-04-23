@@ -20,7 +20,7 @@ from src.helpers.plotting.plot_postfit_residuals_linear import make_postfit_resi
 
 
 CR_FIXED = 1.38
-RUN_DAYS = 10.0
+RUN_DAYS = 50.0
 
 x0_batch_start = np.array(
     [
@@ -278,7 +278,7 @@ def main():
         R=R_batch,
         dyn_fun=dyn_fun,
         dyn_jac=dyn_jac,
-        max_iter=10,
+        max_iter=100,
         tol=1.0e-8,
         prop_settings=PropSettings(rtol=1.0e-10, atol=1.0e-10, method="RK45"),
     )

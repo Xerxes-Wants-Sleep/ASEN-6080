@@ -1,0 +1,21 @@
+{
+  "units": {
+    "BdotT_km": "km",
+    "BdotR_km": "km",
+    "rp_km": "km",
+    "rp_alt_km": "km",
+    "sigma_T_km": "km",
+    "sigma_R_km": "km"
+  },
+  "records": [
+    {
+      "label": "Forward Station IEKF",
+      "BdotT_km": 9798.709189595478,
+      "BdotR_km": 8120.858854831052,
+      "rp_km": 9556.075100703583,
+      "rp_alt_km": 3177.938800703583,
+      "sigma_T_km": 18.95356058943672,
+      "sigma_R_km": 36.81220524760812
+    }
+  ]
+}

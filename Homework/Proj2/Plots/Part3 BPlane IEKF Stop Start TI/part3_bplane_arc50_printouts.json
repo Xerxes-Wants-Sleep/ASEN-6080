@@ -1,0 +1,49 @@
+{
+  "records": [
+    {
+      "case": "Forward IEKF Stop-Start",
+      "day_target": 50.0,
+      "day_selected": 51.791666666666664,
+      "BdotT_km": -38851.0347796313,
+      "BdotR_km": -740.047329043394,
+      "sigma_T_km": 9629.680620946521,
+      "sigma_R_km": 3304.6736864840636
+    },
+    {
+      "case": "Forward IEKF Stop-Start",
+      "day_target": 100.0,
+      "day_selected": 98.65972222222223,
+      "BdotT_km": 7995.774104556003,
+      "BdotR_km": 14124.623155872509,
+      "sigma_T_km": 119.56955474360068,
+      "sigma_R_km": 44.924972904890865
+    },
+    {
+      "case": "Forward IEKF Stop-Start",
+      "day_target": 150.0,
+      "day_selected": 150.0,
+      "BdotT_km": -7674.7572186340385,
+      "BdotR_km": 9757.982156025426,
+      "sigma_T_km": 275.92341581561993,
+      "sigma_R_km": 97.11424761548759
+    },
+    {
+      "case": "Forward IEKF Stop-Start",
+      "day_target": 200.0,
+      "day_selected": 201.5,
+      "BdotT_km": 6235.82892197163,
+      "BdotR_km": 13452.804051547371,
+      "sigma_T_km": 1121.5772030263108,
+      "sigma_R_km": 1639.7956805784954
+    },
+    {
+      "case": "Forward IEKF Stop-Start",
+      "day_target": 250.0,
+      "day_selected": 247.4162962962963,
+      "BdotT_km": 8944.720480676755,
+      "BdotR_km": 8043.2367383319515,
+      "sigma_T_km": 18.327971596079944,
+      "sigma_R_km": 35.698717567759786
+    }
+  ]
+}

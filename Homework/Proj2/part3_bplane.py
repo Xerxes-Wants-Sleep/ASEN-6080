@@ -188,6 +188,17 @@ def make_bplane_plot(rec: dict, outdir: Path):
     ax.set_xlabel("T [km]")
     ax.set_ylabel("R [km]")
     ax.set_title("Part 3: B-Plane Crossings and 3-Sigma Ellipses (2b Estimates)")
+    earth = plt.Circle(
+        (0.0, 0.0),
+        R_EARTH_KM,
+        facecolor="tab:green",
+        edgecolor="k",
+        linewidth=1.0,
+        alpha=0.25,
+        label=f"Earth (R={R_EARTH_KM:.1f} km)",
+        zorder=1,
+    )
+    ax.add_patch(earth)
 
     cov_tr = np.asarray(rec["cov_tr_km2"], dtype=float)
     ex, ey = ellipse_points_from_cov(cov_tr, n_sigma=3.0, n_pts=500)
@@ -196,14 +207,180 @@ def make_bplane_plot(rec: dict, outdir: Path):
     br = float(rec["BdotR_km"])
     label = str(rec["label"])
 
-    ax.plot(bt + ex, br + ey, "-", color="tab:blue", linewidth=1.5, label=f"3-sigma: {label}")
-    ax.plot(bt, br, "x", color="tab:blue", markersize=9, linewidth=2.0, label=f"{label} crossing")
+    ax.plot(bt + ex, br + ey, "-", color="tab:blue", linewidth=1.5, label=f"3-sigma: {label}", zorder=3)
+    ax.plot(bt, br, "x", color="tab:blue", markersize=9, linewidth=2.0, label=f"{label} crossing", zorder=4)
 
     ax.legend(loc="best")
     fig.tight_layout()
     file_tag = _safe_label_for_filename(label)
     fig.savefig(outdir / f"part3_bplane_crossings_3sigma_{file_tag}.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
+
+
+def _resolve_history_npz_path(base: Path, payload: dict) -> Path | None:
+    history_source = payload.get("history_source", None)
+    if isinstance(history_source, str) and len(history_source.strip()) > 0:
+        p = Path(history_source)
+        if not p.is_absolute():
+            p = (base / p).resolve()
+        if p.exists():
+            return p
+
+    fallback = base / "Plots" / "Maneuver Check IEKF" / "maneuver_check_history.npz"
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def build_bplane_arc_records(
+    *,
+    label: str,
+    t_hist: np.ndarray,
+    x_hist: np.ndarray,
+    p_hist: np.ndarray,
+    arc_days_target: list[float],
+    p_const,
+    sc_const,
+    earth_state_func,
+    sun_state_func,
+):
+    t_days = np.asarray(t_hist, dtype=float) / 86400.0
+    x_hist = np.asarray(x_hist, dtype=float)
+    p_hist = np.asarray(p_hist, dtype=float)
+    if x_hist.ndim != 2 or p_hist.ndim != 3:
+        raise ValueError("History arrays must be x_hist=(N,n), p_hist=(N,n,n).")
+
+    records = []
+    for d_target in arc_days_target:
+        idx = int(np.argmin(np.abs(t_days - float(d_target))))
+        t_arc = float(t_hist[idx])
+        d_sel = float(t_days[idx])
+
+        x6 = np.asarray(x_hist[idx, :6], dtype=float)
+        p6 = np.asarray(p_hist[idx, :6, :6], dtype=float)
+        x7, p7 = augment_to_7state(x6, p6)
+
+        t_3soi, x_3soi, p_3soi = propagate_snapshot_to_3soi_with_stm(
+            x7=x7,
+            P7=p7,
+            t_start=t_arc,
+            p_const=p_const,
+            sc_const=sc_const,
+            earth_state_func=earth_state_func,
+            sun_state_func=sun_state_func,
+            t_search_days=400.0,
+        )
+
+        (
+            bdot_r_km,
+            bdot_t_km,
+            _sig_r,
+            _sig_t,
+            _sig_rt,
+            _x_crossing,
+            p_bplane,
+            _str2eci,
+            _xphi_bplane,
+            _t_bplane,
+        ) = calc_bplane(
+            XPhi_3SOI=x_3soi,
+            t_3SOI=t_3soi,
+            P_3SOI=p_3soi,
+            pConst=p_const,
+            scConst=sc_const,
+            earth_state_func=earth_state_func,
+            sun_state_func=sun_state_func,
+        )
+
+        cov_tr = np.array(
+            [
+                [p_bplane[1, 1], p_bplane[1, 2]],
+                [p_bplane[1, 2], p_bplane[2, 2]],
+            ],
+            dtype=float,
+        )
+        records.append(
+            {
+                "label": label,
+                "day_target": float(d_target),
+                "day_selected": d_sel,
+                "idx": idx,
+                "t_arc_s": t_arc,
+                "t_3soi_s": float(t_3soi),
+                "BdotT_km": float(bdot_t_km),
+                "BdotR_km": float(bdot_r_km),
+                "cov_tr_km2": cov_tr,
+                "sigma_T_km": float(np.sqrt(max(cov_tr[0, 0], 0.0))),
+                "sigma_R_km": float(np.sqrt(max(cov_tr[1, 1], 0.0))),
+            }
+        )
+    return records
+
+
+def make_bplane_arc_overlay_plot(records: list[dict], outdir: Path, *, title: str, filename: str):
+    outdir.mkdir(parents=True, exist_ok=True)
+    colors = ["tab:red", "tab:green", "tab:blue", "tab:orange", "tab:purple", "tab:brown"]
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("T [km]")
+    ax.set_ylabel("R [km]")
+    ax.set_title(title)
+    earth = plt.Circle(
+        (0.0, 0.0),
+        R_EARTH_KM,
+        facecolor="tab:green",
+        edgecolor="k",
+        linewidth=1.0,
+        alpha=0.25,
+        label=f"Earth (R={R_EARTH_KM:.1f} km)",
+        zorder=1,
+    )
+    ax.add_patch(earth)
+
+    for i, rec in enumerate(records):
+        col = colors[i % len(colors)]
+        cov_tr = np.asarray(rec["cov_tr_km2"], dtype=float)
+        ex, ey = ellipse_points_from_cov(cov_tr, n_sigma=3.0, n_pts=500)
+        bt = float(rec["BdotT_km"])
+        br = float(rec["BdotR_km"])
+        day = float(rec["day_selected"])
+        ax.plot(
+            bt + ex,
+            br + ey,
+            "-",
+            color=col,
+            linewidth=1.5,
+            label=f"3-sigma, ~{day:.1f} days",
+            zorder=3,
+        )
+        ax.plot(
+            bt,
+            br,
+            "x",
+            color=col,
+            markersize=8,
+            linewidth=2.0,
+            label=f"Arc {i+1}: T={bt:.1f}, R={br:.1f} km",
+            zorder=4,
+        )
+
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(outdir / filename, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _print_table_from_rows(rows: list[dict], *, title: str, col_order: list[str]):
+    if len(rows) == 0:
+        return
+    df = pd.DataFrame(rows)
+    cols = [c for c in col_order if c in df.columns]
+    if len(cols) == 0:
+        return
+    print(f"\n{title}")
+    print(df.loc[:, cols].to_string(index=False, float_format=lambda x: f"{x:,.3f}"))
 
 
 def main():
@@ -329,9 +506,88 @@ def main():
                 "sigma_R_km": rec["sigma_R_km"],
             }
         )
+    _print_table_from_rows(
+        rows,
+        title="Part 3 B-Plane Summary Table (Covariance Used For Ellipse)",
+        col_order=["label", "BdotT_km", "BdotR_km", "sigma_T_km", "sigma_R_km", "rp_km", "rp_alt_km"],
+    )
     pd.DataFrame(rows).to_csv(outdir / "part3_bplane_summary.csv", index=False)
+    json_payload = {
+        "units": {
+            "BdotT_km": "km",
+            "BdotR_km": "km",
+            "rp_km": "km",
+            "rp_alt_km": "km",
+            "sigma_T_km": "km",
+            "sigma_R_km": "km",
+        },
+        "records": rows,
+    }
+    with open(outdir / "part3_bplane_printouts.json", "w", encoding="utf-8") as f:
+        json.dump(json_payload, f, indent=2)
+
+    # Additional output: tests.py-style B-plane arc overlays every 50 days
+    history_path = _resolve_history_npz_path(base, payload)
+    arc_rows = []
+    if history_path is not None:
+        hist = np.load(history_path)
+        t_days_hist = np.asarray(hist["t_meas"], dtype=float) / 86400.0
+        max_day = float(np.nanmax(t_days_hist))
+        max_target_day = 50.0 * float(np.ceil(max_day / 50.0))
+        arc_days_target = [float(d) for d in np.arange(50.0, max_target_day + 1.0e-9, 50.0)]
+        history_specs = [
+            ("Forward IEKF Seed", "xhat_meas", "P_meas"),
+            ("Smoothed IEKF Seed", "xhat_smooth", "P_smooth"),
+        ]
+        for case_label, x_key, p_key in history_specs:
+            if (x_key not in hist) or (p_key not in hist) or ("t_meas" not in hist):
+                continue
+            recs_case = build_bplane_arc_records(
+                label=case_label,
+                t_hist=np.asarray(hist["t_meas"], dtype=float),
+                x_hist=np.asarray(hist[x_key], dtype=float),
+                p_hist=np.asarray(hist[p_key], dtype=float),
+                arc_days_target=arc_days_target,
+                p_const=p_const,
+                sc_const=sc_const,
+                earth_state_func=earth_state_func,
+                sun_state_func=sun_state_func,
+            )
+            make_bplane_arc_overlay_plot(
+                recs_case,
+                outdir,
+                title=f"{case_label}: B-Plane Crossings and 3-Sigma by 50-Day Arc",
+                filename=f"part3_bplane_3sigma_by_arc_{_safe_label_for_filename(case_label)}.png",
+            )
+            for rec in recs_case:
+                arc_rows.append(
+                    {
+                        "case": rec["label"],
+                        "day_target": rec["day_target"],
+                        "day_selected": rec["day_selected"],
+                        "BdotT_km": rec["BdotT_km"],
+                        "BdotR_km": rec["BdotR_km"],
+                        "sigma_T_km": rec["sigma_T_km"],
+                        "sigma_R_km": rec["sigma_R_km"],
+                    }
+                )
+
+    if len(arc_rows) > 0:
+        _print_table_from_rows(
+            arc_rows,
+            title="Part 3 B-Plane 50-Day Arc Table (Covariance Used For Ellipse)",
+            col_order=["case", "day_target", "day_selected", "BdotT_km", "BdotR_km", "sigma_T_km", "sigma_R_km"],
+        )
+        pd.DataFrame(arc_rows).to_csv(outdir / "part3_bplane_arc50_summary.csv", index=False)
+        with open(outdir / "part3_bplane_arc50_printouts.json", "w", encoding="utf-8") as f:
+            json.dump({"records": arc_rows}, f, indent=2)
+        print(f"Saved B-plane 50-day arc summary: {outdir / 'part3_bplane_arc50_summary.csv'}")
+    else:
+        print("No history file/keys found for 50-day arc overlay plots.")
+
     print(f"Saved B-plane plots to: {outdir}")
     print(f"Saved B-plane summary: {outdir / 'part3_bplane_summary.csv'}")
+    print(f"Saved B-plane printout JSON: {outdir / 'part3_bplane_printouts.json'}")
 
 
 if __name__ == "__main__":

@@ -287,7 +287,7 @@ def main():
     R_iekf = np.diag([sigma_rho_km**2, sigma_rhod_km_s**2])
 
     # SNC
-    sigma_acc_km_s2 = 1.0e-8
+    sigma_acc_km_s2 = 1.0e-9
     Q_iekf = np.diag([sigma_acc_km_s2**2, sigma_acc_km_s2**2, sigma_acc_km_s2**2])
 
     dyn_iekf = lambda tau, x: mu_sun_srp_state_deriv(

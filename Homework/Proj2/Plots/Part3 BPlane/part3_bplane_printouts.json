@@ -1,0 +1,21 @@
+{
+  "units": {
+    "BdotT_km": "km",
+    "BdotR_km": "km",
+    "rp_km": "km",
+    "rp_alt_km": "km",
+    "sigma_T_km": "km",
+    "sigma_R_km": "km"
+  },
+  "records": [
+    {
+      "label": "Forward IEKF Seed",
+      "BdotT_km": 9248.373978799631,
+      "BdotR_km": 8294.408705094218,
+      "rp_km": 9264.835818249778,
+      "rp_alt_km": 2886.6995182497776,
+      "sigma_T_km": 11.970937853480201,
+      "sigma_R_km": 15.573622915994072
+    }
+  ]
+}

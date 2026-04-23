@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import scipy.io
 from scipy.integrate import solve_ivp
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -59,7 +60,7 @@ def build_problem_constants():
     srp_area_mass_ratio = 0.01
 
     p_const = type("pConst", (), {})()
-    p_const.mu_earth = 398600.4415
+    p_const.mu_earth = 3.98600432896939e5
     p_const.mu_sun = mu_sun
 
     sc_const = type("scConst", (), {})()
@@ -148,8 +149,8 @@ def propagate_snapshot_to_3soi_with_stm(
         t_span=(float(t_arc), float(t_arc) + float(t_search_days) * 86400.0),
         y0=y0,
         events=soi_event,
-        rtol=1.0e-10,
-        atol=1.0e-10,
+        rtol=1.0e-12,
+        atol=1.0e-12,
         method="RK45",
         max_step=3600.0,
     )
@@ -190,7 +191,9 @@ def main():
             0.1**2,
         ]
     ).astype(float)
-    Q_iekf = np.zeros((7, 7), dtype=float)
+    # Q_iekf = np.zeros((7, 7), dtype=float) #SNC
+    sigma_acc_km_s2 = 1.0e-10
+    Q_iekf = np.diag([sigma_acc_km_s2**2] * 7).astype(float)
 
     dyn_iekf = lambda tau, x: mu_sun_srp_state_deriv(
         t=tau,
@@ -218,6 +221,39 @@ def main():
             c=sc_const.c,
             AU_m=sc_const.AU_m,
         )
+
+    # ------------------------------------------------------------------
+    # 50-day truth propagation check (full 7-state error vs truth file)
+    # ------------------------------------------------------------------
+    truth_path = Path(__file__).resolve().parent / "Given_data" / "Project2_Prob2_truth_traj_50days.mat"
+    truth = scipy.io.loadmat(truth_path)
+    t_truth = np.asarray(truth["Tt_50"], dtype=float).reshape(-1)
+    Xt_truth = np.asarray(truth["Xt_50"], dtype=float)
+    X_truth_7 = Xt_truth[:, 0:7]
+
+    sol_truth = solve_ivp(
+        fun=dyn_iekf,
+        t_span=(float(t_truth[0]), float(t_truth[-1])),
+        y0=np.asarray(X_truth_7[0], dtype=float),
+        t_eval=t_truth,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        method="RK45",
+    )
+    X_prop_7 = np.asarray(sol_truth.y.T, dtype=float)
+    err_7 = X_prop_7 - X_truth_7
+
+    state_labels = ["x", "y", "z", "vx", "vy", "vz", "Cr"]
+    print("\n50-Day Truth Propagation Error (Propagated - Truth):")
+    print("  Component        Final Error           RMS Error         Max |Error|")
+    for i, lab in enumerate(state_labels):
+        e = err_7[:, i]
+        print(f"  {lab:>4s}      {e[-1]: .6e}      {np.sqrt(np.mean(e**2)): .6e}      {np.max(np.abs(e)): .6e}")
+
+    pos_norm = np.linalg.norm(err_7[:, 0:3], axis=1)
+    vel_norm = np.linalg.norm(err_7[:, 3:6], axis=1)
+    print(f"  Pos-3 norm RMS: {np.sqrt(np.mean(pos_norm**2)):.6e} km")
+    print(f"  Vel-3 norm RMS: {np.sqrt(np.mean(vel_norm**2)):.6e} km/s")
 
     iekf_2a = IEKF2(
         x0=x0_iekf,

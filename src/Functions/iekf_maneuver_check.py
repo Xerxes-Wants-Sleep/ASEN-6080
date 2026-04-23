@@ -232,8 +232,8 @@ class IEKF2:
         t_prev_init=None,
         *,
         iterated: bool = False,
-        max_iter: int = 10,
-        iter_tol: float = 1.0e-8,
+        max_iter: int = 100,
+        iter_tol: float = 1.0e-10,
         bound_level: float = 5.0,
         no_snc_on_first_after_gap: bool = False,
         gap_threshold_s: float | None = None,
@@ -310,7 +310,7 @@ class IEKF2:
 
         I_n = np.eye(self.n)
         I_2 = np.eye(2)
-        sigma_bounds = float(bound_level) * np.sqrt(np.maximum(np.diag(self.R), 0.0))
+        # sigma_bounds = float(bound_level) * np.sqrt(np.maximum(np.diag(self.R), 0.0))
         gap_thresh = self.first_pass_gap_s if gap_threshold_s is None else float(gap_threshold_s)
         t_wall = time.perf_counter()
         prog_step = max(int(progress_every), 1)
@@ -419,16 +419,26 @@ class IEKF2:
                     iter_counts[j] = 1
                     S_last = S
                 else:
-                    X_i = Xbar.copy()
-                    eta = np.zeros(self.n, dtype=float)
+                    
+                    # Xhat_km   = Xbar
+                    # Xhat_kip  = current iterate
+                    # Xhat_kip1 = next iterate
+                    Xhat_km = Xbar.copy()
+                    Xhat_kip = Xbar.copy()
+
+                    diff = np.inf
+                    iter_count = 0
+
                     K_last = np.zeros((self.n, 2), dtype=float)
                     H_last = Hbar.copy()
                     S_last = Hbar @ Pbar @ Hbar.T + self.R
-                    taken = 0
 
-                    for it in range(int(max_iter)):
-                        H_i = self._build_H(st_rep, X_i, t)
-                        h_i = self.G(st_rep, X_i, t)
+                    while diff > iter_tol:
+                        if iter_count > max_iter:
+                            break
+
+                        H_i = self._build_H(st_rep, Xhat_kip, t)
+                        h_i = self.G(st_rep, Xhat_kip, t)
                         if h_i is None or (not np.isfinite(h_i).all()):
                             break
 
@@ -436,29 +446,66 @@ class IEKF2:
 
                         S = H_i @ Pbar @ H_i.T + self.R
                         K = Pbar @ H_i.T @ np.linalg.solve(S, I_2)
-                        eta_new = K @ (y_res + H_i @ eta)
+
+                        # Friend's MATLAB form:
+                        # Xhat_kip1p = Xhat_km + K*(y_k - h_k - H_k*(Xhat_km - Xhat_kip))
+                        Xhat_kip1 = Xhat_km + K @ (y_res - H_i @ (Xhat_km - Xhat_kip))
+
+                        diff = np.linalg.norm(Xhat_kip1 - Xhat_kip)
 
                         K_last = K
                         H_last = H_i
                         S_last = S
 
-                        X_next = Xbar + eta_new
-                        taken += 1
-                        residual_ok = np.all(np.abs(y_res) <= sigma_bounds)
-                        state_ok = np.linalg.norm(eta_new - eta) < float(iter_tol)
-                        if it > 0 and (residual_ok or state_ok):
-                            eta = eta_new
-                            X_i = X_next
-                            break
+                        Xhat_kip = Xhat_kip1
+                        iter_count += 1
 
-                        eta = eta_new
-                        X_i = X_next
-
-                    X_hat = X_i
+                    X_hat = Xhat_kip
                     A = I_n - K_last @ H_last
                     P = A @ Pbar @ A.T + K_last @ self.R @ K_last.T
                     P = 0.5 * (P + P.T)
-                    iter_counts[j] = max(taken, 1)
+                    iter_counts[j] = max(iter_count, 1)
+                # else:
+                #     X_i = Xbar.copy()
+                #     eta = np.zeros(self.n, dtype=float)
+                #     K_last = np.zeros((self.n, 2), dtype=float)
+                #     H_last = Hbar.copy()
+                #     S_last = Hbar @ Pbar @ Hbar.T + self.R
+                #     taken = 0
+
+                #     for it in range(int(max_iter)):
+                #         H_i = self._build_H(st_rep, X_i, t)
+                #         h_i = self.G(st_rep, X_i, t)
+                #         if h_i is None or (not np.isfinite(h_i).all()):
+                #             break
+
+                #         y_res = Y - h_i
+
+                #         S = H_i @ Pbar @ H_i.T + self.R
+                #         K = Pbar @ H_i.T @ np.linalg.solve(S, I_2)
+                #         eta_new = K @ (y_res + H_i @ eta)
+
+                #         K_last = K
+                #         H_last = H_i
+                #         S_last = S
+
+                #         X_next = Xbar + eta_new
+                #         taken += 1
+                #         max_iter = 500
+                #         residual_ok = np.all(np.abs(y_res) <= sigma_bounds)
+                #         if residual_ok:
+                #             eta = eta_new
+                #             X_i = X_next
+                #             break
+
+                #         eta = eta_new
+                #         X_i = X_next
+
+                #     X_hat = X_i
+                #     A = I_n - K_last @ H_last
+                #     P = A @ Pbar @ A.T + K_last @ self.R @ K_last.T
+                #     P = 0.5 * (P + P.T)
+                #     iter_counts[j] = max(taken, 1)
 
                 dx = X_hat - Xbar
                 postfit_lin[j, :] = OminusC - (Hbar @ dx)

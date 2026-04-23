@@ -1,0 +1,21 @@
+{
+  "units": {
+    "BdotT_km": "km",
+    "BdotR_km": "km",
+    "rp_km": "km",
+    "rp_alt_km": "km",
+    "sigma_T_km": "km",
+    "sigma_R_km": "km"
+  },
+  "records": [
+    {
+      "label": "Forward IEKF Stop-Start",
+      "BdotT_km": 8944.720480676755,
+      "BdotR_km": 8043.2367383319515,
+      "rp_km": 8887.920678210996,
+      "rp_alt_km": 2509.784378210996,
+      "sigma_T_km": 18.327971596079944,
+      "sigma_R_km": 35.698717567759786
+    }
+  ]
+}
